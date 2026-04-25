@@ -32,6 +32,7 @@ type Paragraph struct {
 	Position     int                    `json:"position"`
 	Content      string                 `json:"content"`
 	ImageURL     string                 `json:"image_url"`
+	AudioURL     string                 `json:"audio_url"`
 	Translations []ParagraphTranslation `json:"translations,omitempty"`
 	Vocabulary   []Vocabulary           `json:"vocabulary,omitempty"`
 }
@@ -87,6 +88,7 @@ type CreateParagraphRequest struct {
 	Position int    `json:"position"`
 	Content  string `json:"content"`
 	ImageURL string `json:"image_url"`
+	AudioURL string `json:"audio_url"`
 }
 
 type CreateTranslationRequest struct {
@@ -108,9 +110,10 @@ type CreateVoiceRequest struct {
 // --- Full story creation (single request) ---
 
 type FullParagraph struct {
-	Position     int                      `json:"position"`
-	Content      string                   `json:"content"`
-	ImageURL     string                   `json:"image_url"`
+	Position     int                        `json:"position"`
+	Content      string                     `json:"content"`
+	ImageURL     string                     `json:"image_url"`
+	AudioURL     string                     `json:"audio_url"`
 	Translations []CreateTranslationRequest `json:"translations"`
 	Vocabulary   []CreateVocabularyRequest  `json:"vocabulary"`
 }

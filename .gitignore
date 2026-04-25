@@ -1,0 +1,24 @@
+# Binaries
+main
+api
+seed_admin
+seed_categories
+seed_full_story
+clean_db
+insert_5_para
+list_cats
+update_assets
+
+# Environment variables
+.env
+
+# Dependencies
+vendor/
+
+# Uploaded files — keep folder structure, ignore content
+uploads/audio/*
+!uploads/audio/.gitkeep
+
+# OS metadata
+.DS_Store
+Thumbs.db

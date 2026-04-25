@@ -2,21 +2,26 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"listen-with-me/backend/internal/model"
 	"listen-with-me/backend/internal/repository"
+	"listen-with-me/backend/internal/storage"
 )
 
 type StoryHandler struct {
 	stories *repository.StoryRepo
+	audio   storage.AudioStorage
 }
 
-func NewStoryHandler(stories *repository.StoryRepo) *StoryHandler {
-	return &StoryHandler{stories: stories}
+func NewStoryHandler(stories *repository.StoryRepo, audio storage.AudioStorage) *StoryHandler {
+	return &StoryHandler{stories: stories, audio: audio}
 }
 
 // GET /api/categories
@@ -281,6 +286,102 @@ func (h *StoryHandler) AddVoice(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// POST /api/paragraphs/{id}/audio/upload  [admin]
+func (h *StoryHandler) UploadParagraphAudio(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/paragraphs/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	const maxSize = 100 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		jsonError(w, "file too large or invalid form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		jsonError(w, "file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := filepath.Ext(header.Filename)
+	filename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
+
+	url, err := h.audio.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
+	if err != nil {
+		log.Printf("paragraph audio upload error: %v", err)
+		jsonError(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.stories.SetParagraphAudio(id, url); err != nil {
+		log.Printf("set paragraph audio error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"audio_url": url})
+}
+
+// POST /api/stories/{id}/voices/upload  [admin]
+func (h *StoryHandler) UploadVoiceAudio(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	const maxSize = 100 << 20 // 100 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		jsonError(w, "file too large or invalid form", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		jsonError(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		jsonError(w, "file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := filepath.Ext(header.Filename)
+	filename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
+
+	url, err := h.audio.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
+	if err != nil {
+		log.Printf("audio upload error: %v", err)
+		jsonError(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	v := &model.StoryVoice{
+		StoryID:    id,
+		Name:       name,
+		AudioURL:   url,
+		Timestamps: []model.VoiceTimestamp{},
+	}
+	if err := h.stories.AddVoice(v); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(v)
+}
+
 // helpers
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -292,4 +393,20 @@ func pathID(r *http.Request, prefix string) (int, error) {
 	raw := strings.TrimPrefix(r.URL.Path, prefix)
 	raw = strings.Split(raw, "/")[0]
 	return strconv.Atoi(raw)
+}
+
+func sanitizeFilename(name string) string {
+	var buf []byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			buf = append(buf, c)
+		} else {
+			buf = append(buf, '_')
+		}
+	}
+	if len(buf) == 0 {
+		return "audio"
+	}
+	return string(buf)
 }

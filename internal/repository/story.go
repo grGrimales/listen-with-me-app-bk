@@ -170,9 +170,9 @@ func (r *StoryRepo) UpdateFull(id int, req *model.CreateFullStoryRequest) error 
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, image_url)
-			 VALUES ($1, $2, $3, $4) RETURNING id`,
-			id, fp.Position, fp.Content, fp.ImageURL,
+			`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			id, fp.Position, fp.Content, fp.ImageURL, fp.AudioURL,
 		).Scan(&pID)
 		if err != nil {
 			return err
@@ -247,15 +247,15 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, image_url)
-			 VALUES ($1, $2, $3, $4) RETURNING id`,
-			story.ID, fp.Position, fp.Content, fp.ImageURL,
+			`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			story.ID, fp.Position, fp.Content, fp.ImageURL, fp.AudioURL,
 		).Scan(&pID)
 		if err != nil {
 			return nil, err
 		}
 
-		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content, ImageURL: fp.ImageURL}
+		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content, ImageURL: fp.ImageURL, AudioURL: fp.AudioURL}
 
 		for _, tr := range fp.Translations {
 			var tID int
@@ -316,15 +316,22 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 
 func (r *StoryRepo) AddParagraph(p *model.Paragraph) error {
 	return r.db.QueryRow(
-		`INSERT INTO paragraphs (story_id, position, content, image_url)
-		 VALUES ($1, $2, $3, $4) RETURNING id`,
-		p.StoryID, p.Position, p.Content, p.ImageURL,
+		`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		p.StoryID, p.Position, p.Content, p.ImageURL, p.AudioURL,
 	).Scan(&p.ID)
+}
+
+func (r *StoryRepo) SetParagraphAudio(id int, url string) error {
+	_, err := r.db.Exec(
+		`UPDATE paragraphs SET audio_url = $1 WHERE id = $2`, url, id,
+	)
+	return err
 }
 
 func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	rows, err := r.db.Query(
-		`SELECT id, story_id, position, content, COALESCE(image_url,'')
+		`SELECT id, story_id, position, content, COALESCE(image_url,''), COALESCE(audio_url,'')
 		 FROM paragraphs WHERE story_id = $1 ORDER BY position`, storyID,
 	)
 	if err != nil {
@@ -335,7 +342,7 @@ func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	var paragraphs []model.Paragraph
 	for rows.Next() {
 		var p model.Paragraph
-		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.ImageURL); err != nil {
+		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.ImageURL, &p.AudioURL); err != nil {
 			return nil, err
 		}
 		translations, err := r.listTranslations(p.ID)

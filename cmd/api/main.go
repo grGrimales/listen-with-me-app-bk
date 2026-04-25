@@ -12,6 +12,7 @@ import (
 	"listen-with-me/backend/internal/handler"
 	"listen-with-me/backend/internal/middleware"
 	"listen-with-me/backend/internal/repository"
+	"listen-with-me/backend/internal/storage"
 )
 
 func main() {
@@ -41,13 +42,34 @@ func main() {
 	}
 	log.Println("connected to database")
 
+	uploadDir := os.Getenv("UPLOAD_DIR")
+	if uploadDir == "" {
+		uploadDir = "./uploads/audio"
+	}
+	serverBaseURL := os.Getenv("SERVER_BASE_URL")
+	if serverBaseURL == "" {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8082"
+		}
+		serverBaseURL = "http://localhost:" + port
+	}
+	audioStorage, err := storage.NewLocalStorage(uploadDir, serverBaseURL)
+	if err != nil {
+		log.Fatal("failed to initialize audio storage:", err)
+	}
+	log.Printf("audio storage: local dir=%s base=%s", uploadDir, serverBaseURL)
+
 	userRepo := repository.NewUserRepo(db)
 	storyRepo := repository.NewStoryRepo(db)
 
 	authH := handler.NewAuthHandler(userRepo)
-	storyH := handler.NewStoryHandler(storyRepo)
+	storyH := handler.NewStoryHandler(storyRepo, audioStorage)
 
 	mux := http.NewServeMux()
+
+	// Static — uploaded audio files
+	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
 
 	// Public
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +96,8 @@ func main() {
 	mux.Handle("POST /api/stories/full", admin(storyH.CreateFull))
 	mux.Handle("POST /api/stories/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case hasSegment(r.URL.Path, "voices") && hasSegment(r.URL.Path, "upload"):
+			storyH.UploadVoiceAudio(w, r)
 		case hasSegment(r.URL.Path, "paragraphs"):
 			storyH.AddParagraph(w, r)
 		case hasSegment(r.URL.Path, "voices"):
@@ -86,6 +110,8 @@ func main() {
 	})))
 	mux.Handle("POST /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "upload"):
+			storyH.UploadParagraphAudio(w, r)
 		case hasSegment(r.URL.Path, "translations"):
 			storyH.AddTranslation(w, r)
 		case hasSegment(r.URL.Path, "vocabulary"):
@@ -100,10 +126,10 @@ func main() {
 		port = "8082"
 	}
 
-	handler := securityMiddleware(corsMiddleware(mux))
+	h := securityMiddleware(corsMiddleware(mux))
 
 	log.Printf("server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
+	if err := http.ListenAndServe(":"+port, h); err != nil {
 		log.Fatal(err)
 	}
 }
