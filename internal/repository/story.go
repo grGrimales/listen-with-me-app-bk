@@ -609,3 +609,94 @@ func (r *StoryRepo) listVoices(storyID int) ([]model.StoryVoice, error) {
 	}
 	return voices, nil
 }
+
+// --- Reviews & Stats ---
+
+func (r *StoryRepo) AddReview(userID string, storyID int) error {
+	_, err := r.db.Exec(
+		`INSERT INTO user_story_reviews (user_id, story_id) VALUES ($1, $2)`,
+		userID, storyID,
+	)
+	return err
+}
+
+func (r *StoryRepo) GetUserStats(userID string) (*model.UserStats, error) {
+	stats := &model.UserStats{
+		DailyReviews:   []model.StatPeriod{},
+		MonthlyReviews: []model.StatPeriod{},
+		YearlyReviews:  []model.StatPeriod{},
+		HistorySummary: []model.StorySummary{},
+	}
+
+	// Total reviews
+	err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM user_story_reviews WHERE user_id = $1`, userID,
+	).Scan(&stats.TotalReviews)
+	if err != nil {
+		return nil, err
+	}
+
+	// Daily
+	rows, err := r.db.Query(`
+		SELECT TO_CHAR(reviewed_at, 'YYYY-MM-DD') as period, COUNT(*) 
+		FROM user_story_reviews 
+		WHERE user_id = $1 
+		GROUP BY period ORDER BY period DESC LIMIT 30`, userID)
+	if err == nil {
+		for rows.Next() {
+			var p model.StatPeriod
+			rows.Scan(&p.Period, &p.Count)
+			stats.DailyReviews = append(stats.DailyReviews, p)
+		}
+		rows.Close()
+	}
+
+	// Monthly
+	rows, err = r.db.Query(`
+		SELECT TO_CHAR(reviewed_at, 'YYYY-MM') as period, COUNT(*) 
+		FROM user_story_reviews 
+		WHERE user_id = $1 
+		GROUP BY period ORDER BY period DESC`, userID)
+	if err == nil {
+		for rows.Next() {
+			var p model.StatPeriod
+			rows.Scan(&p.Period, &p.Count)
+			stats.MonthlyReviews = append(stats.MonthlyReviews, p)
+		}
+		rows.Close()
+	}
+
+	// Yearly
+	rows, err = r.db.Query(`
+		SELECT TO_CHAR(reviewed_at, 'YYYY') as period, COUNT(*) 
+		FROM user_story_reviews 
+		WHERE user_id = $1 
+		GROUP BY period ORDER BY period DESC`, userID)
+	if err == nil {
+		for rows.Next() {
+			var p model.StatPeriod
+			rows.Scan(&p.Period, &p.Count)
+			stats.YearlyReviews = append(stats.YearlyReviews, p)
+		}
+		rows.Close()
+	}
+
+	// History by Story
+	rows, err = r.db.Query(`
+		SELECT s.id, s.title, COUNT(r.id), MAX(r.reviewed_at)
+		FROM stories s
+		JOIN user_story_reviews r ON r.story_id = s.id
+		WHERE r.user_id = $1
+		GROUP BY s.id, s.title
+		ORDER BY MAX(r.reviewed_at) DESC`, userID)
+	if err == nil {
+		for rows.Next() {
+			var s model.StorySummary
+			rows.Scan(&s.StoryID, &s.Title, &s.ReviewCount, &s.LastReviewed)
+			stats.HistorySummary = append(stats.HistorySummary, s)
+		}
+		rows.Close()
+	}
+
+	return stats, nil
+}

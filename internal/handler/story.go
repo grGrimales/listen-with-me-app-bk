@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"listen-with-me/backend/internal/middleware"
 	"listen-with-me/backend/internal/model"
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
@@ -570,4 +572,56 @@ func sanitizeFilename(name string) string {
 		return "audio"
 	}
 	return string(buf)
+}
+
+// POST /api/stories/{id}/review
+func (h *StoryHandler) MarkAsReviewed(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.stories.AddReview(userID, id); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "reviewed"})
+}
+
+// GET /api/stats
+func (h *StoryHandler) GetUserStats(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	stats, err := h.stories.GetUserStats(userID)
+	if err != nil {
+		log.Printf("Error getting user stats: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, stats)
+}
+
+func (h *StoryHandler) userIDFromContext(r *http.Request) (string, error) {
+	claims, ok := r.Context().Value(middleware.ClaimsKey).(jwt.MapClaims)
+	if !ok {
+		return "", fmt.Errorf("no claims")
+	}
+	sub, ok := claims["sub"]
+	if !ok {
+		return "", fmt.Errorf("no sub in claims")
+	}
+	switch v := sub.(type) {
+	case string:
+		return v, nil
+	default:
+		return fmt.Sprintf("%v", v), nil
+	}
 }

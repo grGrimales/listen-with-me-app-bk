@@ -18,6 +18,7 @@ func Auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
+			log.Printf("[DEBUG] Auth: missing or invalid Authorization header prefix")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
@@ -25,11 +26,20 @@ func Auth(next http.Handler) http.Handler {
 		tokenStr := strings.TrimPrefix(header, "Bearer ")
 		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				log.Printf("[DEBUG] Auth: unexpected signing method: %v", t.Header["alg"])
 				return nil, jwt.ErrSignatureInvalid
 			}
 			return []byte(os.Getenv("JWT_SECRET")), nil
 		})
-		if err != nil || !token.Valid {
+		
+		if err != nil {
+			log.Printf("[DEBUG] Auth: token parse error: %v", err)
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		
+		if !token.Valid {
+			log.Printf("[DEBUG] Auth: token is invalid")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}

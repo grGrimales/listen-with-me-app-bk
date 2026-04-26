@@ -142,3 +142,30 @@ func (v *StoryVoice) MarshalTimestamps() ([]byte, error) {
 	}
 	return json.Marshal(v.Timestamps)
 }
+
+type StoryReview struct {
+	ID         int       `json:"id"`
+	UserID     string    `json:"user_id"`
+	StoryID    int       `json:"story_id"`
+	ReviewedAt time.Time `json:"reviewed_at"`
+}
+
+type UserStats struct {
+	TotalReviews    int            `json:"total_reviews"`
+	DailyReviews    []StatPeriod   `json:"daily_reviews"`
+	MonthlyReviews  []StatPeriod   `json:"monthly_reviews"`
+	YearlyReviews   []StatPeriod   `json:"yearly_reviews"`
+	HistorySummary  []StorySummary `json:"history_summary"`
+}
+
+type StatPeriod struct {
+	Period string `json:"period"` // e.g. "2026-04-26", "2026-04", "2026"
+	Count  int    `json:"count"`
+}
+
+type StorySummary struct {
+	StoryID      int       `json:"story_id"`
+	Title        string    `json:"title"`
+	ReviewCount  int       `json:"review_count"`
+	LastReviewed time.Time `json:"last_reviewed"`
+}
