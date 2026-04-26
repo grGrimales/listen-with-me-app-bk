@@ -732,15 +732,13 @@ func (r *StoryRepo) UpdatePlaylist(p *model.Playlist) error {
 }
 
 func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
+	// Simplified query to avoid complex joins and potential type issues with UUID in subqueries
 	rows, err := r.db.Query(`
 		SELECT p.id, p.user_id, p.name, p.description, p.created_at, p.updated_at,
-		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) as story_count,
-		       (SELECT COUNT(*) FROM user_story_reviews usr 
-		        JOIN playlist_stories ps ON ps.story_id = usr.story_id 
-		        WHERE ps.playlist_id = p.id AND usr.user_id = p.user_id) as total_reviews
+		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) as story_count
 		FROM playlists p
-		WHERE p.user_id = $1
-		ORDER BY p.created_at DESC, total_reviews ASC`, userID)
+		WHERE p.user_id = $1::uuid
+		ORDER BY p.created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -749,8 +747,7 @@ func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
 	var list []model.Playlist = []model.Playlist{}
 	for rows.Next() {
 		var p model.Playlist
-		var totalReviews int // Temporary to match scan
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount, &totalReviews); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount); err != nil {
 			return nil, err
 		}
 		list = append(list, p)

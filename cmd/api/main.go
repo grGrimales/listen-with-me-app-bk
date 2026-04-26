@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"listen-with-me/backend/internal/handler"
 	"listen-with-me/backend/internal/middleware"
@@ -31,11 +31,18 @@ func main() {
 		log.Println("WARNING: JWT_SECRET is too short. Use at least 32 characters for better security.")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		log.Fatal("failed to open database:", err)
 	}
+	// Important for Neon/PgBouncer: disable prepared statements if using pooler
+	// While dsn can have default_query_exec_mode=simple_protocol, 
+	// we ensure the connection is healthy.
+	if err := db.Ping(); err != nil {
+		log.Printf("Warning: initial ping failed (might be SCRAM error): %v", err)
+	}
 	defer db.Close()
+
 
 	if err := db.Ping(); err != nil {
 		log.Fatal("failed to connect to database:", err)
@@ -46,19 +53,33 @@ func main() {
 	if uploadDir == "" {
 		uploadDir = "./uploads"
 	}
-	serverBaseURL := os.Getenv("SERVER_BASE_URL")
-	if serverBaseURL == "" {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8082"
+	
+	var audioStorage storage.FileStorage
+	cloudinaryURL := os.Getenv("CLOUDINARY_URL")
+	
+	if cloudinaryURL != "" {
+		var err error
+		audioStorage, err = storage.NewCloudinaryStorage(cloudinaryURL)
+		if err != nil {
+			log.Fatal("failed to initialize cloudinary storage:", err)
 		}
-		serverBaseURL = "http://localhost:" + port
+		log.Println("using cloudinary storage")
+	} else {
+		serverBaseURL := os.Getenv("SERVER_BASE_URL")
+		if serverBaseURL == "" {
+			port := os.Getenv("PORT")
+			if port == "" {
+				port = "8082"
+			}
+			serverBaseURL = "http://localhost:" + port
+		}
+		var err error
+		audioStorage, err = storage.NewLocalStorage(uploadDir, serverBaseURL)
+		if err != nil {
+			log.Fatal("failed to initialize local storage:", err)
+		}
+		log.Printf("using local storage: dir=%s base=%s", uploadDir, serverBaseURL)
 	}
-	audioStorage, err := storage.NewLocalStorage(uploadDir, serverBaseURL)
-	if err != nil {
-		log.Fatal("failed to initialize audio storage:", err)
-	}
-	log.Printf("audio storage: local dir=%s base=%s", uploadDir, serverBaseURL)
 
 	userRepo := repository.NewUserRepo(db)
 	storyRepo := repository.NewStoryRepo(db)

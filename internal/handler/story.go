@@ -637,6 +637,7 @@ func (h *StoryHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.stories.ListPlaylists(userID)
 	if err != nil {
+		log.Printf("Error listing playlists for user %s: %v", userID, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -668,6 +669,7 @@ func (h *StoryHandler) CreatePlaylist(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "a playlist with this name already exists", http.StatusConflict)
 			return
 		}
+		log.Printf("Error creating playlist: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -702,6 +704,7 @@ func (h *StoryHandler) UpdatePlaylist(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "a playlist with this name already exists", http.StatusConflict)
 			return
 		}
+		log.Printf("Error updating playlist %d: %v", id, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -720,6 +723,7 @@ func (h *StoryHandler) DeletePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.stories.DeletePlaylist(id, userID); err != nil {
+		log.Printf("Error deleting playlist %d: %v", id, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -738,6 +742,7 @@ func (h *StoryHandler) AddStoryToPlaylist(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.stories.AddStoryToPlaylist(pID, req.StoryID); err != nil {
+		log.Printf("Error adding story %d to playlist %d: %v", req.StoryID, pID, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -758,6 +763,7 @@ func (h *StoryHandler) RemoveStoryFromPlaylist(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err := h.stories.RemoveStoryFromPlaylist(pID, sID); err != nil {
+		log.Printf("Error removing story %d from playlist %d: %v", sID, pID, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
