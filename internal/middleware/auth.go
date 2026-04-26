@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -43,16 +44,21 @@ func AdminOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := r.Context().Value(ClaimsKey).(jwt.MapClaims)
 		if !ok {
+			log.Printf("[DEBUG] AdminOnly: no claims found in context")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		roles, _ := claims["roles"].([]interface{})
+		rolesRaw := claims["roles"]
+		log.Printf("[DEBUG] AdminOnly: roles in token: %v (%T)", rolesRaw, rolesRaw)
+		
+		roles, _ := rolesRaw.([]interface{})
 		for _, role := range roles {
 			if role == "admin" {
 				next.ServeHTTP(w, r)
 				return
 			}
 		}
+		log.Printf("[DEBUG] AdminOnly: 'admin' role not found in %v", roles)
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 	})
 }

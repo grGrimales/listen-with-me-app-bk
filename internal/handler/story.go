@@ -17,11 +17,11 @@ import (
 
 type StoryHandler struct {
 	stories *repository.StoryRepo
-	audio   storage.AudioStorage
+	storage storage.FileStorage
 }
 
-func NewStoryHandler(stories *repository.StoryRepo, audio storage.AudioStorage) *StoryHandler {
-	return &StoryHandler{stories: stories, audio: audio}
+func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage) *StoryHandler {
+	return &StoryHandler{stories: stories, storage: storage}
 }
 
 // GET /api/categories
@@ -47,6 +47,36 @@ func (h *StoryHandler) ListStories(w http.ResponseWriter, r *http.Request) {
 		stories = []model.Story{}
 	}
 	jsonOK(w, stories)
+}
+
+// GET /api/stories/deleted [admin]
+func (h *StoryHandler) ListDeletedStories(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[DEBUG] ListDeletedStories handler entered")
+	stories, err := h.stories.ListDeleted()
+	if err != nil {
+		log.Printf("[DEBUG] ListDeletedStories ERROR: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[DEBUG] ListDeletedStories returning %d stories", len(stories))
+	if stories == nil {
+		stories = []model.Story{}
+	}
+	jsonOK(w, stories)
+}
+
+// POST /api/stories/{id}/restore [admin]
+func (h *StoryHandler) RestoreStory(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.Restore(id); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "restored"})
 }
 
 // GET /api/stories/{id}
@@ -184,7 +214,13 @@ func (h *StoryHandler) AddParagraph(w http.ResponseWriter, r *http.Request) {
 		StoryID:  id,
 		Position: req.Position,
 		Content:  req.Content,
-		ImageURL: req.ImageURL,
+		AudioURL: req.AudioURL,
+	}
+	for i, url := range req.Images {
+		p.Images = append(p.Images, model.ParagraphImage{
+			ImageURL: url,
+			Position: i,
+		})
 	}
 	if err := h.stories.AddParagraph(p); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -309,9 +345,9 @@ func (h *StoryHandler) UploadParagraphAudio(w http.ResponseWriter, r *http.Reque
 	defer file.Close()
 
 	ext := filepath.Ext(header.Filename)
-	filename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
+	filename := fmt.Sprintf("audio/%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
 
-	url, err := h.audio.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
+	url, err := h.storage.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
 	if err != nil {
 		log.Printf("paragraph audio upload error: %v", err)
 		jsonError(w, "upload failed", http.StatusInternalServerError)
@@ -326,6 +362,131 @@ func (h *StoryHandler) UploadParagraphAudio(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"audio_url": url})
+}
+
+// DELETE /api/paragraphs/{id}/audio [admin]
+func (h *StoryHandler) DeleteParagraphAudio(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/paragraphs/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	p, err := h.stories.GetParagraphByID(id)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if p == nil {
+		jsonError(w, "paragraph not found", http.StatusNotFound)
+		return
+	}
+
+	if p.AudioURL != "" {
+		if err := h.storage.Delete(r.Context(), p.AudioURL); err != nil {
+			log.Printf("error deleting paragraph audio from storage: %v", err)
+			// We continue even if storage delete fails to allow clearing the DB reference
+		}
+	}
+
+	if err := h.stories.SetParagraphAudio(id, ""); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "audio deleted"})
+}
+
+// POST /api/paragraphs/{id}/images/upload [admin]
+func (h *StoryHandler) UploadParagraphImage(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[DEBUG] UploadParagraphImage handler entered")
+	id, err := pathID(r, "/api/paragraphs/")
+	if err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: invalid id: %v", err)
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	// Check current image count
+	p, err := h.stories.GetParagraphByID(id)
+	if err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: GetParagraphByID error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if p == nil {
+		log.Printf("[DEBUG] UploadParagraphImage: paragraph %d not found", id)
+		jsonError(w, "paragraph not found", http.StatusNotFound)
+		return
+	}
+	if len(p.Images) >= 5 {
+		log.Printf("[DEBUG] UploadParagraphImage: max images reached for paragraph %d", id)
+		jsonError(w, "maximum 5 images per paragraph", http.StatusBadRequest)
+		return
+	}
+
+	const maxSize = 10 << 20 // 10 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: ParseMultipartForm error: %v", err)
+		jsonError(w, "file too large or invalid form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: FormFile error: %v", err)
+		jsonError(w, "file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := filepath.Ext(header.Filename)
+	filename := fmt.Sprintf("images/%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
+
+	log.Printf("[DEBUG] UploadParagraphImage: uploading file %s", filename)
+	url, err := h.storage.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
+	if err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: storage upload error: %v", err)
+		jsonError(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	img := &model.ParagraphImage{
+		ParagraphID: id,
+		ImageURL:    url,
+		Position:    len(p.Images),
+	}
+	log.Printf("[DEBUG] UploadParagraphImage: adding image record to DB")
+	if err := h.stories.AddParagraphImage(img); err != nil {
+		log.Printf("[DEBUG] UploadParagraphImage: AddParagraphImage DB error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[DEBUG] UploadParagraphImage: success")
+	jsonOK(w, img)
+}
+
+// DELETE /api/paragraphs/images/{id} [admin]
+func (h *StoryHandler) DeleteParagraphImage(w http.ResponseWriter, r *http.Request) {
+	// Note: we use /api/paragraphs/images/ prefix to get the image ID
+	id, err := pathID(r, "/api/paragraphs/images/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	// Optional: we could fetch the image to delete it from storage too.
+	// For simplicity, we'll just delete the record for now, 
+	// but the architecture supports h.storage.Delete if we had the URL.
+
+	if err := h.stories.DeleteParagraphImage(id); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "image deleted"})
 }
 
 // POST /api/stories/{id}/voices/upload  [admin]
@@ -357,9 +518,9 @@ func (h *StoryHandler) UploadVoiceAudio(w http.ResponseWriter, r *http.Request) 
 	defer file.Close()
 
 	ext := filepath.Ext(header.Filename)
-	filename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
+	filename := fmt.Sprintf("audio/%d_%s%s", time.Now().UnixNano(), sanitizeFilename(strings.TrimSuffix(header.Filename, ext)), ext)
 
-	url, err := h.audio.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
+	url, err := h.storage.Upload(r.Context(), filename, file, header.Header.Get("Content-Type"))
 	if err != nil {
 		log.Printf("audio upload error: %v", err)
 		jsonError(w, "upload failed", http.StatusInternalServerError)

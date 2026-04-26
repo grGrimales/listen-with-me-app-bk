@@ -31,10 +31,17 @@ type Paragraph struct {
 	StoryID      int                    `json:"story_id"`
 	Position     int                    `json:"position"`
 	Content      string                 `json:"content"`
-	ImageURL     string                 `json:"image_url"`
+	Images       []ParagraphImage       `json:"images"`
 	AudioURL     string                 `json:"audio_url"`
 	Translations []ParagraphTranslation `json:"translations,omitempty"`
 	Vocabulary   []Vocabulary           `json:"vocabulary,omitempty"`
+}
+
+type ParagraphImage struct {
+	ID          int    `json:"id"`
+	ParagraphID int    `json:"paragraph_id"`
+	ImageURL    string `json:"image_url"`
+	Position    int    `json:"position"`
 }
 
 type ParagraphTranslation struct {
@@ -85,10 +92,10 @@ type CreateStoryRequest struct {
 }
 
 type CreateParagraphRequest struct {
-	Position int    `json:"position"`
-	Content  string `json:"content"`
-	ImageURL string `json:"image_url"`
-	AudioURL string `json:"audio_url"`
+	Position int      `json:"position"`
+	Content  string   `json:"content"`
+	Images   []string `json:"images"`
+	AudioURL string   `json:"audio_url"`
 }
 
 type CreateTranslationRequest struct {
@@ -112,7 +119,7 @@ type CreateVoiceRequest struct {
 type FullParagraph struct {
 	Position     int                        `json:"position"`
 	Content      string                     `json:"content"`
-	ImageURL     string                     `json:"image_url"`
+	Images       []string                   `json:"images"`
 	AudioURL     string                     `json:"audio_url"`
 	Translations []CreateTranslationRequest `json:"translations"`
 	Vocabulary   []CreateVocabularyRequest  `json:"vocabulary"`

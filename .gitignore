@@ -1,13 +1,14 @@
 # Binaries
-main
-api
-seed_admin
-seed_categories
-seed_full_story
-clean_db
-insert_5_para
-list_cats
-update_assets
+/main
+/api
+/seed_admin
+/seed_categories
+/seed_full_story
+/clean_db
+/insert_5_para
+/list_cats
+/update_assets
+/server.exe
 
 # Environment variables
 .env
@@ -18,6 +19,8 @@ vendor/
 # Uploaded files — keep folder structure, ignore content
 uploads/audio/*
 !uploads/audio/.gitkeep
+uploads/images/*
+!uploads/images/.gitkeep
 
 # OS metadata
 .DS_Store

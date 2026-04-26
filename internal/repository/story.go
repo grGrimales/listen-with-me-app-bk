@@ -43,19 +43,21 @@ func (r *StoryRepo) Create(s *model.Story) error {
 	return r.db.QueryRow(
 		`INSERT INTO stories (title, level, category_id, cover_url, author, status)
 		 VALUES ($1, $2, $3, $4, $5, 'draft')
-		 RETURNING id, created_at, updated_at`,
+		 RETURNING id, status, created_at, updated_at`,
 		s.Title, s.Level, s.CategoryID, s.CoverURL, s.Author,
-	).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 }
 
 func (r *StoryRepo) List(onlyPublished bool) ([]model.Story, error) {
+	log.Printf("Listing stories (onlyPublished=%v)", onlyPublished)
 	query := `
 		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
 		       c.id, c.name, c.slug
 		FROM stories s
-		JOIN categories c ON c.id = s.category_id`
+		JOIN categories c ON c.id = s.category_id
+		WHERE s.status != 'deleted'`
 	if onlyPublished {
-		query += ` WHERE s.status = 'published'`
+		query += ` AND s.status = 'published'`
 	}
 	query += ` ORDER BY s.created_at DESC`
 
@@ -65,7 +67,7 @@ func (r *StoryRepo) List(onlyPublished bool) ([]model.Story, error) {
 	}
 	defer rows.Close()
 
-	var stories []model.Story
+	var stories []model.Story = []model.Story{}
 	for rows.Next() {
 		var s model.Story
 		var cat model.Category
@@ -78,6 +80,41 @@ func (r *StoryRepo) List(onlyPublished bool) ([]model.Story, error) {
 		s.Category = &cat
 		stories = append(stories, s)
 	}
+	log.Printf("Found %d non-deleted stories", len(stories))
+	return stories, nil
+}
+
+func (r *StoryRepo) ListDeleted() ([]model.Story, error) {
+	log.Printf("Listing deleted stories")
+	query := `
+		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
+		       c.id, c.name, c.slug
+		FROM stories s
+		JOIN categories c ON c.id = s.category_id
+		WHERE s.status = 'deleted'
+		ORDER BY s.updated_at DESC`
+
+	rows, err := r.db.Query(query)
+	if err != nil {
+		log.Printf("Error querying deleted stories: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stories []model.Story = []model.Story{}
+	for rows.Next() {
+		var s model.Story
+		var cat model.Category
+		if err := rows.Scan(
+			&s.ID, &s.Title, &s.Level, &s.CoverURL, &s.Author, &s.Status, &s.CreatedAt, &s.UpdatedAt,
+			&cat.ID, &cat.Name, &cat.Slug,
+		); err != nil {
+			return nil, err
+		}
+		s.Category = &cat
+		stories = append(stories, s)
+	}
+	log.Printf("Found %d deleted stories", len(stories))
 	return stories, nil
 }
 
@@ -124,7 +161,14 @@ func (r *StoryRepo) Publish(id int) error {
 }
 
 func (r *StoryRepo) Delete(id int) error {
-	_, err := r.db.Exec(`DELETE FROM stories WHERE id = $1`, id)
+	log.Printf("Soft deleting story ID: %d", id)
+	_, err := r.db.Exec(`UPDATE stories SET status = 'deleted', updated_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+func (r *StoryRepo) Restore(id int) error {
+	log.Printf("Restoring story ID: %d", id)
+	_, err := r.db.Exec(`UPDATE stories SET status = 'draft', updated_at = NOW() WHERE id = $1`, id)
 	return err
 }
 
@@ -170,12 +214,23 @@ func (r *StoryRepo) UpdateFull(id int, req *model.CreateFullStoryRequest) error 
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
-			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			id, fp.Position, fp.Content, fp.ImageURL, fp.AudioURL,
+			`INSERT INTO paragraphs (story_id, position, content, audio_url)
+			 VALUES ($1, $2, $3, $4) RETURNING id`,
+			id, fp.Position, fp.Content, fp.AudioURL,
 		).Scan(&pID)
 		if err != nil {
 			return err
+		}
+
+		for i, imgURL := range fp.Images {
+			_, err = tx.Exec(
+				`INSERT INTO paragraph_images (paragraph_id, image_url, position)
+				 VALUES ($1, $2, $3)`,
+				pID, imgURL, i,
+			)
+			if err != nil {
+				return err
+			}
 		}
 
 		for _, tr := range fp.Translations {
@@ -247,15 +302,30 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
-			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			story.ID, fp.Position, fp.Content, fp.ImageURL, fp.AudioURL,
+			`INSERT INTO paragraphs (story_id, position, content, audio_url)
+			 VALUES ($1, $2, $3, $4) RETURNING id`,
+			story.ID, fp.Position, fp.Content, fp.AudioURL,
 		).Scan(&pID)
 		if err != nil {
 			return nil, err
 		}
 
-		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content, ImageURL: fp.ImageURL, AudioURL: fp.AudioURL}
+		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content, AudioURL: fp.AudioURL}
+
+		for i, imgURL := range fp.Images {
+			var imgID int
+			err = tx.QueryRow(
+				`INSERT INTO paragraph_images (paragraph_id, image_url, position)
+				 VALUES ($1, $2, $3) RETURNING id`,
+				pID, imgURL, i,
+			).Scan(&imgID)
+			if err != nil {
+				return nil, err
+			}
+			p.Images = append(p.Images, model.ParagraphImage{
+				ID: imgID, ParagraphID: pID, ImageURL: imgURL, Position: i,
+			})
+		}
 
 		for _, tr := range fp.Translations {
 			var tID int
@@ -315,11 +385,26 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 // --- Paragraphs ---
 
 func (r *StoryRepo) AddParagraph(p *model.Paragraph) error {
-	return r.db.QueryRow(
-		`INSERT INTO paragraphs (story_id, position, content, image_url, audio_url)
-		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		p.StoryID, p.Position, p.Content, p.ImageURL, p.AudioURL,
+	err := r.db.QueryRow(
+		`INSERT INTO paragraphs (story_id, position, content, audio_url)
+		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		p.StoryID, p.Position, p.Content, p.AudioURL,
 	).Scan(&p.ID)
+	if err != nil {
+		return err
+	}
+
+	for i, url := range p.Images {
+		_, err = r.db.Exec(
+			`INSERT INTO paragraph_images (paragraph_id, image_url, position)
+			 VALUES ($1, $2, $3)`,
+			p.ID, url.ImageURL, i,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *StoryRepo) SetParagraphAudio(id int, url string) error {
@@ -329,9 +414,31 @@ func (r *StoryRepo) SetParagraphAudio(id int, url string) error {
 	return err
 }
 
+func (r *StoryRepo) GetParagraphByID(id int) (*model.Paragraph, error) {
+	p := &model.Paragraph{}
+	err := r.db.QueryRow(
+		`SELECT id, story_id, position, content, COALESCE(audio_url,'')
+		 FROM paragraphs WHERE id = $1`, id,
+	).Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	images, err := r.listImages(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	p.Images = images
+
+	return p, nil
+}
+
 func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	rows, err := r.db.Query(
-		`SELECT id, story_id, position, content, COALESCE(image_url,''), COALESCE(audio_url,'')
+		`SELECT id, story_id, position, content, COALESCE(audio_url,'')
 		 FROM paragraphs WHERE story_id = $1 ORDER BY position`, storyID,
 	)
 	if err != nil {
@@ -339,12 +446,19 @@ func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	}
 	defer rows.Close()
 
-	var paragraphs []model.Paragraph
+	var paragraphs []model.Paragraph = []model.Paragraph{}
 	for rows.Next() {
 		var p model.Paragraph
-		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.ImageURL, &p.AudioURL); err != nil {
+		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL); err != nil {
 			return nil, err
 		}
+
+		images, err := r.listImages(p.ID)
+		if err != nil {
+			return nil, err
+		}
+		p.Images = images
+
 		translations, err := r.listTranslations(p.ID)
 		if err != nil {
 			return nil, err
@@ -360,6 +474,41 @@ func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	}
 	return paragraphs, nil
 }
+
+func (r *StoryRepo) listImages(paragraphID int) ([]model.ParagraphImage, error) {
+	rows, err := r.db.Query(
+		`SELECT id, paragraph_id, image_url, position FROM paragraph_images WHERE paragraph_id = $1 ORDER BY position`,
+		paragraphID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var images []model.ParagraphImage = []model.ParagraphImage{}
+	for rows.Next() {
+		var img model.ParagraphImage
+		if err := rows.Scan(&img.ID, &img.ParagraphID, &img.ImageURL, &img.Position); err != nil {
+			return nil, err
+		}
+		images = append(images, img)
+	}
+	return images, nil
+}
+
+func (r *StoryRepo) AddParagraphImage(img *model.ParagraphImage) error {
+	return r.db.QueryRow(
+		`INSERT INTO paragraph_images (paragraph_id, image_url, position)
+		 VALUES ($1, $2, $3) RETURNING id`,
+		img.ParagraphID, img.ImageURL, img.Position,
+	).Scan(&img.ID)
+}
+
+func (r *StoryRepo) DeleteParagraphImage(id int) error {
+	_, err := r.db.Exec(`DELETE FROM paragraph_images WHERE id = $1`, id)
+	return err
+}
+
 
 // --- Translations ---
 

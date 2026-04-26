@@ -44,7 +44,7 @@ func main() {
 
 	uploadDir := os.Getenv("UPLOAD_DIR")
 	if uploadDir == "" {
-		uploadDir = "./uploads/audio"
+		uploadDir = "./uploads"
 	}
 	serverBaseURL := os.Getenv("SERVER_BASE_URL")
 	if serverBaseURL == "" {
@@ -85,6 +85,7 @@ func main() {
 	}
 
 	// Authenticated — read
+	mux.Handle("GET /api/admin/stories/trash-items", admin(http.HandlerFunc(storyH.ListDeletedStories)))
 	mux.Handle("GET /api/categories", middleware.Auth(http.HandlerFunc(storyH.ListCategories)))
 	mux.Handle("GET /api/stories", middleware.Auth(http.HandlerFunc(storyH.ListStories)))
 	mux.Handle("GET /api/stories/", middleware.Auth(http.HandlerFunc(storyH.GetStory)))
@@ -104,18 +105,34 @@ func main() {
 			storyH.AddVoice(w, r)
 		case hasSegment(r.URL.Path, "publish"):
 			storyH.PublishStory(w, r)
+		case hasSegment(r.URL.Path, "restore"):
+			storyH.RestoreStory(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})))
 	mux.Handle("POST /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[DEBUG] POST /api/paragraphs/ hit: %s", r.URL.Path)
 		switch {
 		case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "upload"):
 			storyH.UploadParagraphAudio(w, r)
+		case hasSegment(r.URL.Path, "images") && hasSegment(r.URL.Path, "upload"):
+			storyH.UploadParagraphImage(w, r)
 		case hasSegment(r.URL.Path, "translations"):
 			storyH.AddTranslation(w, r)
 		case hasSegment(r.URL.Path, "vocabulary"):
 			storyH.AddVocabulary(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})))
+
+	mux.Handle("DELETE /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case hasSegment(r.URL.Path, "audio"):
+			storyH.DeleteParagraphAudio(w, r)
+		case hasSegment(r.URL.Path, "images"):
+			storyH.DeleteParagraphImage(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -126,12 +143,25 @@ func main() {
 		port = "8082"
 	}
 
-	h := securityMiddleware(corsMiddleware(mux))
+	h := recoveryMiddleware(securityMiddleware(corsMiddleware(mux)))
 
 	log.Printf("server listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, h); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[REQ] %s %s", r.Method, r.URL.Path)
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func hasSegment(path, segment string) bool {
@@ -159,6 +189,7 @@ func splitPath(path string) []string {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[CORS] %s %s", r.Method, r.URL.Path)
 		origin := os.Getenv("ALLOWED_ORIGIN")
 		if origin == "" {
 			origin = "http://localhost:5173"
