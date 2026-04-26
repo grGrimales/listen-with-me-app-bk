@@ -1,15 +1,13 @@
 {
   "version": 2,
-  "builds": [
+  "rewrites": [
     {
-      "src": "cmd/api/main.go",
-      "use": "@vercel/go"
-    }
-  ],
-  "routes": [
+      "source": "/api/(.*)",
+      "destination": "/api/index.go"
+    },
     {
-      "src": "/(.*)",
-      "dest": "cmd/api/main.go"
+      "source": "/health",
+      "destination": "/api/index.go"
     }
   ]
 }
