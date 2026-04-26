@@ -26,7 +26,10 @@ func main() {
 	defer db.Close()
 
 	email := "admin@listenwithme.com"
-	password := "admin1234"
+	password := os.Getenv("ADMIN_SEED_PASSWORD")
+	if password == "" {
+		password = "change_me_immediately"
+	}
 	fullName := "Admin User"
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

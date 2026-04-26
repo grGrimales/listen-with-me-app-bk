@@ -9,6 +9,21 @@
 /list_cats
 /update_assets
 /server.exe
+/server_test.exe
+/*.exe
+
+# Scripts de utilidad (Seeds, tests locales)
+/cmd/seed_admin
+/cmd/seed_full_story
+/cmd/clean_db
+/cmd/insert_5_para
+/cmd/list_cats
+/cmd/update_assets
+/cmd/set_admin
+/cmd/migrate_all
+/cmd/migrate_consolidated
+/cmd/reset_db
+/cmd/fix_images_table
 
 # Environment variables
 .env
