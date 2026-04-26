@@ -38,7 +38,8 @@ func (h *StoryHandler) ListCategories(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/stories
 func (h *StoryHandler) ListStories(w http.ResponseWriter, r *http.Request) {
-	stories, err := h.stories.List(false)
+	playlistID, _ := strconv.Atoi(r.URL.Query().Get("playlist_id"))
+	stories, err := h.stories.List(false, playlistID)
 	if err != nil {
 		log.Printf("Error listing stories: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -624,4 +625,141 @@ func (h *StoryHandler) userIDFromContext(r *http.Request) (string, error) {
 	default:
 		return fmt.Sprintf("%v", v), nil
 	}
+}
+
+// --- Playlists ---
+
+func (h *StoryHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	list, err := h.stories.ListPlaylists(userID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, list)
+}
+
+func (h *StoryHandler) CreatePlaylist(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req model.CreatePlaylistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		jsonError(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	p := &model.Playlist{
+		UserID:      userID,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	if err := h.stories.CreatePlaylist(p); err != nil {
+		if strings.Contains(err.Error(), "unique_user_playlist_name") {
+			jsonError(w, "a playlist with this name already exists", http.StatusConflict)
+			return
+		}
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	jsonOK(w, p)
+}
+
+func (h *StoryHandler) UpdatePlaylist(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/playlists/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req model.CreatePlaylistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	p := &model.Playlist{
+		ID:          id,
+		UserID:      userID,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	if err := h.stories.UpdatePlaylist(p); err != nil {
+		if strings.Contains(err.Error(), "unique_user_playlist_name") {
+			jsonError(w, "a playlist with this name already exists", http.StatusConflict)
+			return
+		}
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "updated"})
+}
+
+func (h *StoryHandler) DeletePlaylist(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/playlists/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.stories.DeletePlaylist(id, userID); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+func (h *StoryHandler) AddStoryToPlaylist(w http.ResponseWriter, r *http.Request) {
+	pID, err := pathID(r, "/api/playlists/")
+	if err != nil {
+		jsonError(w, "invalid playlist id", http.StatusBadRequest)
+		return
+	}
+	var req model.AddStoryToPlaylistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.AddStoryToPlaylist(pID, req.StoryID); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "added"})
+}
+
+func (h *StoryHandler) RemoveStoryFromPlaylist(w http.ResponseWriter, r *http.Request) {
+	// Pattern: /api/playlists/{id}/stories/{storyID}
+	pID, err := pathID(r, "/api/playlists/")
+	if err != nil {
+		jsonError(w, "invalid playlist id", http.StatusBadRequest)
+		return
+	}
+	raw := strings.TrimPrefix(r.URL.Path, fmt.Sprintf("/api/playlists/%d/stories/", pID))
+	sID, err := strconv.Atoi(raw)
+	if err != nil {
+		jsonError(w, "invalid story id", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.RemoveStoryFromPlaylist(pID, sID); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "removed"})
 }

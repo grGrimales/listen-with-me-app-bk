@@ -169,3 +169,22 @@ type StorySummary struct {
 	ReviewCount  int       `json:"review_count"`
 	LastReviewed time.Time `json:"last_reviewed"`
 }
+
+type Playlist struct {
+	ID          int       `json:"id"`
+	UserID      string    `json:"user_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	StoryCount  int       `json:"story_count"`
+}
+
+type CreatePlaylistRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type AddStoryToPlaylistRequest struct {
+	StoryID int `json:"story_id"`
+}

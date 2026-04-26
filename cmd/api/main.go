@@ -86,6 +86,7 @@ func main() {
 
 	// Authenticated — read
 	mux.Handle("GET /api/stats", middleware.Auth(http.HandlerFunc(storyH.GetUserStats)))
+	mux.Handle("GET /api/playlists", middleware.Auth(http.HandlerFunc(storyH.ListPlaylists)))
 	mux.Handle("GET /api/admin/stories/trash-items", admin(http.HandlerFunc(storyH.ListDeletedStories)))
 	mux.Handle("GET /api/categories", middleware.Auth(http.HandlerFunc(storyH.ListCategories)))
 	mux.Handle("GET /api/stories", middleware.Auth(http.HandlerFunc(storyH.ListStories)))
@@ -93,7 +94,12 @@ func main() {
 	mux.Handle("PUT /api/stories/", admin(storyH.UpdateStory))
 	mux.Handle("DELETE /api/stories/", admin(storyH.DeleteStory))
 
-	// Admin — write
+	// Authenticated — write
+	mux.Handle("POST /api/playlists", middleware.Auth(http.HandlerFunc(storyH.CreatePlaylist)))
+	mux.Handle("PUT /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.UpdatePlaylist)))
+	mux.Handle("DELETE /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.DeletePlaylist)))
+	mux.Handle("POST /api/playlists/{id}/stories", middleware.Auth(http.HandlerFunc(storyH.AddStoryToPlaylist)))
+	mux.Handle("DELETE /api/playlists/{id}/stories/", middleware.Auth(http.HandlerFunc(storyH.RemoveStoryFromPlaylist)))
 	mux.Handle("POST /api/stories/{id}/review", middleware.Auth(http.HandlerFunc(storyH.MarkAsReviewed)))
 	mux.Handle("POST /api/stories", admin(storyH.CreateStory))
 	mux.Handle("POST /api/stories/full", admin(storyH.CreateFull))

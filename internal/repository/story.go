@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"listen-with-me/backend/internal/model"
 )
@@ -48,20 +49,31 @@ func (r *StoryRepo) Create(s *model.Story) error {
 	).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 }
 
-func (r *StoryRepo) List(onlyPublished bool) ([]model.Story, error) {
-	log.Printf("Listing stories (onlyPublished=%v)", onlyPublished)
+func (r *StoryRepo) List(onlyPublished bool, playlistID int) ([]model.Story, error) {
+	log.Printf("Listing stories (onlyPublished=%v, playlistID=%d)", onlyPublished, playlistID)
 	query := `
 		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
 		       c.id, c.name, c.slug
 		FROM stories s
-		JOIN categories c ON c.id = s.category_id
-		WHERE s.status != 'deleted'`
+		JOIN categories c ON c.id = s.category_id`
+	
+	args := []interface{}{}
+	where := []string{"s.status != 'deleted'"}
+
 	if onlyPublished {
-		query += ` AND s.status = 'published'`
+		where = append(where, "s.status = 'published'")
 	}
+
+	if playlistID > 0 {
+		query += ` JOIN playlist_stories ps ON ps.story_id = s.id`
+		where = append(where, fmt.Sprintf("ps.playlist_id = $%d", len(args)+1))
+		args = append(args, playlistID)
+	}
+
+	query += " WHERE " + strings.Join(where, " AND ")
 	query += ` ORDER BY s.created_at DESC`
 
-	rows, err := r.db.Query(query)
+	rows, err := r.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +92,6 @@ func (r *StoryRepo) List(onlyPublished bool) ([]model.Story, error) {
 		s.Category = &cat
 		stories = append(stories, s)
 	}
-	log.Printf("Found %d non-deleted stories", len(stories))
 	return stories, nil
 }
 
@@ -699,4 +710,72 @@ func (r *StoryRepo) GetUserStats(userID string) (*model.UserStats, error) {
 	}
 
 	return stats, nil
+}
+
+// --- Playlists ---
+
+func (r *StoryRepo) CreatePlaylist(p *model.Playlist) error {
+	return r.db.QueryRow(
+		`INSERT INTO playlists (user_id, name, description) VALUES ($1, $2, $3)
+		 RETURNING id, created_at, updated_at`,
+		p.UserID, p.Name, p.Description,
+	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+}
+
+func (r *StoryRepo) UpdatePlaylist(p *model.Playlist) error {
+	_, err := r.db.Exec(
+		`UPDATE playlists SET name = $1, description = $2, updated_at = NOW()
+		 WHERE id = $3 AND user_id = $4`,
+		p.Name, p.Description, p.ID, p.UserID,
+	)
+	return err
+}
+
+func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
+	rows, err := r.db.Query(`
+		SELECT p.id, p.user_id, p.name, p.description, p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) as story_count,
+		       (SELECT COUNT(*) FROM user_story_reviews usr 
+		        JOIN playlist_stories ps ON ps.story_id = usr.story_id 
+		        WHERE ps.playlist_id = p.id AND usr.user_id = p.user_id) as total_reviews
+		FROM playlists p
+		WHERE p.user_id = $1
+		ORDER BY p.created_at DESC, total_reviews ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []model.Playlist = []model.Playlist{}
+	for rows.Next() {
+		var p model.Playlist
+		var totalReviews int // Temporary to match scan
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount, &totalReviews); err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+func (r *StoryRepo) DeletePlaylist(id int, userID string) error {
+	_, err := r.db.Exec(`DELETE FROM playlists WHERE id = $1 AND user_id = $2`, id, userID)
+	return err
+}
+
+func (r *StoryRepo) AddStoryToPlaylist(playlistID, storyID int) error {
+	_, err := r.db.Exec(
+		`INSERT INTO playlist_stories (playlist_id, story_id) VALUES ($1, $2)
+		 ON CONFLICT DO NOTHING`,
+		playlistID, storyID,
+	)
+	return err
+}
+
+func (r *StoryRepo) RemoveStoryFromPlaylist(playlistID, storyID int) error {
+	_, err := r.db.Exec(
+		`DELETE FROM playlist_stories WHERE playlist_id = $1 AND story_id = $2`,
+		playlistID, storyID,
+	)
+	return err
 }
