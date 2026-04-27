@@ -97,7 +97,6 @@ func Setup() http.Handler {
 		mux.Handle("GET /api/admin/stories/trash-items", admin(http.HandlerFunc(storyH.ListDeletedStories)))
 		mux.Handle("GET /api/categories", middleware.Auth(http.HandlerFunc(storyH.ListCategories)))
 		mux.Handle("GET /api/stories", middleware.Auth(http.HandlerFunc(storyH.ListStories)))
-		mux.Handle("GET /api/stories/", middleware.Auth(http.HandlerFunc(storyH.GetStory)))
 		mux.Handle("PUT /api/stories/", admin(storyH.UpdateStory))
 		mux.Handle("DELETE /api/stories/", admin(storyH.DeleteStory))
 		mux.Handle("POST /api/playlists", middleware.Auth(http.HandlerFunc(storyH.CreatePlaylist)))
@@ -108,22 +107,34 @@ func Setup() http.Handler {
 		mux.Handle("POST /api/stories/{id}/review", middleware.Auth(http.HandlerFunc(storyH.MarkAsReviewed)))
 		mux.Handle("POST /api/stories", admin(storyH.CreateStory))
 		mux.Handle("POST /api/stories/full", admin(storyH.CreateFull))
+		mux.Handle("DELETE /api/stories/vocabulary/", middleware.Auth(http.HandlerFunc(storyH.DeleteUserVocabulary)))
 		
-		mux.Handle("POST /api/stories/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("POST /api/stories/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Some routes are admin, some are auth
 			switch {
+			case hasSegment(r.URL.Path, "vocabulary"):
+				middleware.Auth(http.HandlerFunc(storyH.AddUserVocabulary)).ServeHTTP(w, r)
 			case hasSegment(r.URL.Path, "voices") && hasSegment(r.URL.Path, "upload"):
-				storyH.UploadVoiceAudio(w, r)
+				admin(storyH.UploadVoiceAudio).ServeHTTP(w, r)
 			case hasSegment(r.URL.Path, "paragraphs"):
-				storyH.AddParagraph(w, r)
+				admin(storyH.AddParagraph).ServeHTTP(w, r)
 			case hasSegment(r.URL.Path, "voices"):
-				storyH.AddVoice(w, r)
+				admin(storyH.AddVoice).ServeHTTP(w, r)
 			case hasSegment(r.URL.Path, "publish"):
-				storyH.PublishStory(w, r)
+				admin(storyH.PublishStory).ServeHTTP(w, r)
 			case hasSegment(r.URL.Path, "restore"):
-				storyH.RestoreStory(w, r)
+				admin(storyH.RestoreStory).ServeHTTP(w, r)
 			default:
 				http.NotFound(w, r)
 			}
+		}))
+
+		mux.Handle("GET /api/stories/", middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hasSegment(r.URL.Path, "vocabulary") {
+				storyH.ListUserVocabulary(w, r)
+				return
+			}
+			storyH.GetStory(w, r)
 		})))
 
 		mux.Handle("POST /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

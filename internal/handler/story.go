@@ -769,3 +769,80 @@ func (h *StoryHandler) RemoveStoryFromPlaylist(w http.ResponseWriter, r *http.Re
 	}
 	jsonOK(w, map[string]string{"status": "removed"})
 }
+
+// --- User Vocabulary ---
+
+// POST /api/stories/{id}/vocabulary
+func (h *StoryHandler) AddUserVocabulary(w http.ResponseWriter, r *http.Request) {
+	storyID, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req model.AddUserVocabularyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if req.Phrase == "" {
+		jsonError(w, "phrase is required", http.StatusBadRequest)
+		return
+	}
+	v := &model.UserVocabulary{
+		UserID:  userID,
+		StoryID: storyID,
+		Phrase:  req.Phrase,
+	}
+	if err := h.stories.AddUserVocabulary(v); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	jsonOK(w, v)
+}
+
+// GET /api/stories/{id}/vocabulary
+func (h *StoryHandler) ListUserVocabulary(w http.ResponseWriter, r *http.Request) {
+	storyID, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	list, err := h.stories.ListUserVocabulary(userID, storyID)
+	if err != nil {
+		log.Printf("Error listing user vocabulary: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, list)
+}
+
+// DELETE /api/stories/vocabulary/{id}
+func (h *StoryHandler) DeleteUserVocabulary(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/vocabulary/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.stories.DeleteUserVocabulary(id, userID); err != nil {
+		log.Printf("Error deleting user vocabulary %d: %v", id, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "deleted"})
+}

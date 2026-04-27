@@ -776,3 +776,42 @@ func (r *StoryRepo) RemoveStoryFromPlaylist(playlistID, storyID int) error {
 	)
 	return err
 }
+
+// --- User Vocabulary ---
+
+func (r *StoryRepo) AddUserVocabulary(v *model.UserVocabulary) error {
+	return r.db.QueryRow(
+		`INSERT INTO user_story_vocabulary (user_id, story_id, phrase)
+		 VALUES ($1, $2, $3) RETURNING id, created_at`,
+		v.UserID, v.StoryID, v.Phrase,
+	).Scan(&v.ID, &v.CreatedAt)
+}
+
+func (r *StoryRepo) ListUserVocabulary(userID string, storyID int) ([]model.UserVocabulary, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, story_id, phrase, created_at
+		 FROM user_story_vocabulary
+		 WHERE user_id = $1 AND story_id = $2
+		 ORDER BY created_at DESC`,
+		userID, storyID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []model.UserVocabulary = []model.UserVocabulary{}
+	for rows.Next() {
+		var v model.UserVocabulary
+		if err := rows.Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, v)
+	}
+	return list, nil
+}
+
+func (r *StoryRepo) DeleteUserVocabulary(id int, userID string) error {
+	_, err := r.db.Exec(`DELETE FROM user_story_vocabulary WHERE id = $1 AND user_id = $2`, id, userID)
+	return err
+}

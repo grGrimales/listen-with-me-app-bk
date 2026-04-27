@@ -150,6 +150,18 @@ type StoryReview struct {
 	ReviewedAt time.Time `json:"reviewed_at"`
 }
 
+type UserVocabulary struct {
+	ID        int       `json:"id"`
+	UserID    string    `json:"user_id"`
+	StoryID   int       `json:"story_id"`
+	Phrase    string    `json:"phrase"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type AddUserVocabularyRequest struct {
+	Phrase string `json:"phrase"`
+}
+
 type UserStats struct {
 	TotalReviews    int            `json:"total_reviews"`
 	DailyReviews    []StatPeriod   `json:"daily_reviews"`

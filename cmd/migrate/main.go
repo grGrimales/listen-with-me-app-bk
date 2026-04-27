@@ -24,7 +24,7 @@ func main() {
 	}
 	defer db.Close()
 
-	migrationPath := filepath.Join("db", "migrations", "009_playlist_unique_name.sql")
+	migrationPath := filepath.Join("db", "migrations", "010_create_user_vocabulary.sql")
 	content, err := os.ReadFile(migrationPath)
 	if err != nil {
 		log.Fatalf("failed to read migration file: %v", err)
