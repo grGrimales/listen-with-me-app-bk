@@ -12,18 +12,20 @@ type Category struct {
 }
 
 type Story struct {
-	ID         int          `json:"id"`
-	Title      string       `json:"title"`
-	Level      string       `json:"level"`
-	CategoryID int          `json:"category_id"`
-	Category   *Category    `json:"category,omitempty"`
-	CoverURL   string       `json:"cover_url"`
-	Author     string       `json:"author"`
-	Status     string       `json:"status"`
-	CreatedAt  time.Time    `json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
-	Paragraphs []Paragraph  `json:"paragraphs,omitempty"`
-	Voices     []StoryVoice `json:"voices,omitempty"`
+	ID             int          `json:"id"`
+	Title          string       `json:"title"`
+	Level          string       `json:"level"`
+	CategoryID     int          `json:"category_id"`
+	Category       *Category    `json:"category,omitempty"`
+	CoverURL       string       `json:"cover_url"`
+	Author         string       `json:"author"`
+	Status         string       `json:"status"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+	Paragraphs     []Paragraph  `json:"paragraphs,omitempty"`
+	Voices         []StoryVoice `json:"voices,omitempty"`
+	ReviewCount    int          `json:"review_count"`
+	LastReviewedAt *time.Time   `json:"last_reviewed_at"`
 }
 
 type Paragraph struct {

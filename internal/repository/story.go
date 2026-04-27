@@ -49,15 +49,18 @@ func (r *StoryRepo) Create(s *model.Story) error {
 	).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 }
 
-func (r *StoryRepo) List(onlyPublished bool, playlistID int) ([]model.Story, error) {
+func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string) ([]model.Story, error) {
 	log.Printf("Listing stories (onlyPublished=%v, playlistID=%d)", onlyPublished, playlistID)
 	query := `
 		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
-		       c.id, c.name, c.slug
+		       c.id, c.name, c.slug,
+		       COUNT(r.id) AS review_count,
+		       MAX(r.reviewed_at) AS last_reviewed_at
 		FROM stories s
-		JOIN categories c ON c.id = s.category_id`
-	
-	args := []interface{}{}
+		JOIN categories c ON c.id = s.category_id
+		LEFT JOIN user_story_reviews r ON r.story_id = s.id AND r.user_id = $1`
+
+	args := []interface{}{userID}
 	where := []string{"s.status != 'deleted'"}
 
 	if onlyPublished {
@@ -71,7 +74,8 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int) ([]model.Story, err
 	}
 
 	query += " WHERE " + strings.Join(where, " AND ")
-	query += ` ORDER BY s.created_at DESC`
+	query += ` GROUP BY s.id, c.id, c.name, c.slug`
+	query += ` ORDER BY last_reviewed_at ASC NULLS FIRST, review_count ASC`
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
@@ -83,11 +87,16 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int) ([]model.Story, err
 	for rows.Next() {
 		var s model.Story
 		var cat model.Category
+		var lastReviewedAt sql.NullTime
 		if err := rows.Scan(
 			&s.ID, &s.Title, &s.Level, &s.CoverURL, &s.Author, &s.Status, &s.CreatedAt, &s.UpdatedAt,
 			&cat.ID, &cat.Name, &cat.Slug,
+			&s.ReviewCount, &lastReviewedAt,
 		); err != nil {
 			return nil, err
+		}
+		if lastReviewedAt.Valid {
+			s.LastReviewedAt = &lastReviewedAt.Time
 		}
 		s.Category = &cat
 		stories = append(stories, s)

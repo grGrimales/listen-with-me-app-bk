@@ -39,7 +39,12 @@ func (h *StoryHandler) ListCategories(w http.ResponseWriter, r *http.Request) {
 // GET /api/stories
 func (h *StoryHandler) ListStories(w http.ResponseWriter, r *http.Request) {
 	playlistID, _ := strconv.Atoi(r.URL.Query().Get("playlist_id"))
-	stories, err := h.stories.List(false, playlistID)
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	stories, err := h.stories.List(false, playlistID, userID)
 	if err != nil {
 		log.Printf("Error listing stories: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -799,6 +804,7 @@ func (h *StoryHandler) AddUserVocabulary(w http.ResponseWriter, r *http.Request)
 		Phrase:  req.Phrase,
 	}
 	if err := h.stories.AddUserVocabulary(v); err != nil {
+		log.Printf("AddUserVocabulary error: userID=%s storyID=%d phrase=%q err=%v", userID, storyID, req.Phrase, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
