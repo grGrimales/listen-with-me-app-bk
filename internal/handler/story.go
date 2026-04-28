@@ -852,3 +852,53 @@ func (h *StoryHandler) DeleteUserVocabulary(w http.ResponseWriter, r *http.Reque
 	}
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
+
+// --- Zen Mode ---
+
+// GET /api/zen/stories
+func (h *StoryHandler) ListZenStories(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	playlistID, _ := strconv.Atoi(r.URL.Query().Get("playlist_id"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	sort := r.URL.Query().Get("sort")
+	if sort == "" {
+		sort = "random"
+	}
+
+	stories, err := h.stories.ListZen(userID, playlistID, limit, sort)
+	if err != nil {
+		log.Printf("Error listing zen stories: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if stories == nil {
+		stories = []model.Story{}
+	}
+	jsonOK(w, stories)
+}
+
+// POST /api/zen/listen
+func (h *StoryHandler) LogZenListen(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		StoryID int `json:"story_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.StoryID == 0 {
+		jsonError(w, "story_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.LogZenListen(userID, req.StoryID); err != nil {
+		log.Printf("Error logging zen listen: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "logged"})
+}

@@ -171,6 +171,10 @@ func Setup() http.Handler {
 			}
 		})))
 
+		// Zen Mode
+		mux.Handle("GET /api/zen/stories", middleware.Auth(http.HandlerFunc(storyH.ListZenStories)))
+		mux.Handle("POST /api/zen/listen", middleware.Auth(http.HandlerFunc(storyH.LogZenListen)))
+
 		// TTS configuration (admin)
 		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))
 		mux.Handle("GET /api/tts/models", admin(http.HandlerFunc(ttsH.ListModels)))

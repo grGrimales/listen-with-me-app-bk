@@ -824,3 +824,78 @@ func (r *StoryRepo) DeleteUserVocabulary(id int, userID string) error {
 	_, err := r.db.Exec(`DELETE FROM user_story_vocabulary WHERE id = $1 AND user_id = $2`, id, userID)
 	return err
 }
+
+// --- Zen Mode ---
+
+func (r *StoryRepo) ListZen(userID string, playlistID, limit int, sort string) ([]model.Story, error) {
+	query := `
+		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
+		       c.id, c.name, c.slug,
+		       COUNT(DISTINCT r.id) AS review_count,
+		       MAX(r.reviewed_at) AS last_reviewed_at
+		FROM stories s
+		JOIN categories c ON c.id = s.category_id
+		LEFT JOIN user_story_reviews r ON r.story_id = s.id AND r.user_id = $1`
+
+	args := []interface{}{userID}
+	where := []string{"s.status != 'deleted'"}
+
+	if playlistID > 0 {
+		query += ` JOIN playlist_stories ps ON ps.story_id = s.id`
+		where = append(where, fmt.Sprintf("ps.playlist_id = $%d", len(args)+1))
+		args = append(args, playlistID)
+	}
+
+	query += " WHERE " + strings.Join(where, " AND ")
+	query += ` GROUP BY s.id, c.id, c.name, c.slug`
+
+	switch sort {
+	case "newest":
+		query += ` ORDER BY s.created_at DESC`
+	case "oldest":
+		query += ` ORDER BY s.created_at ASC`
+	case "least_played":
+		query += ` ORDER BY COUNT(DISTINCT r.id) ASC, s.created_at ASC`
+	default:
+		query += ` ORDER BY RANDOM()`
+	}
+
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, limit)
+	}
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stories []model.Story = []model.Story{}
+	for rows.Next() {
+		var s model.Story
+		var cat model.Category
+		var lastReviewedAt sql.NullTime
+		if err := rows.Scan(
+			&s.ID, &s.Title, &s.Level, &s.CoverURL, &s.Author, &s.Status, &s.CreatedAt, &s.UpdatedAt,
+			&cat.ID, &cat.Name, &cat.Slug,
+			&s.ReviewCount, &lastReviewedAt,
+		); err != nil {
+			return nil, err
+		}
+		if lastReviewedAt.Valid {
+			s.LastReviewedAt = &lastReviewedAt.Time
+		}
+		s.Category = &cat
+		stories = append(stories, s)
+	}
+	return stories, nil
+}
+
+func (r *StoryRepo) LogZenListen(userID string, storyID int) error {
+	_, err := r.db.Exec(
+		`INSERT INTO zen_listens (user_id, story_id) VALUES ($1, $2)`,
+		userID, storyID,
+	)
+	return err
+}
