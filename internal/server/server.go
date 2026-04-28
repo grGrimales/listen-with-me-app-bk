@@ -14,6 +14,7 @@ import (
 	"listen-with-me/backend/internal/middleware"
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
+	"listen-with-me/backend/internal/tts/elevenlabs"
 )
 
 var (
@@ -72,9 +73,14 @@ func Setup() http.Handler {
 
 		userRepo := repository.NewUserRepo(db)
 		storyRepo := repository.NewStoryRepo(db)
+		ttsRepo := repository.NewTTSRepo(db)
+
+		elevenlabsAPIKey := os.Getenv("ELEVENLABS_API_KEY")
+		ttsProvider := elevenlabs.New(elevenlabsAPIKey)
 
 		authH := handler.NewAuthHandler(userRepo)
 		storyH := handler.NewStoryHandler(storyRepo, audioStorage)
+		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
 
 		mux := http.NewServeMux()
 
@@ -137,10 +143,23 @@ func Setup() http.Handler {
 			storyH.GetStory(w, r)
 		})))
 
+		mux.Handle("GET /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "history"):
+				ttsH.ListParagraphAudioHistory(w, r)
+			default:
+				http.NotFound(w, r)
+			}
+		})))
+
 		mux.Handle("POST /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "upload"):
 				storyH.UploadParagraphAudio(w, r)
+			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "generate"):
+				ttsH.GenerateParagraphAudio(w, r)
+			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "restore"):
+				ttsH.RestoreParagraphAudio(w, r)
 			case hasSegment(r.URL.Path, "images") && hasSegment(r.URL.Path, "upload"):
 				storyH.UploadParagraphImage(w, r)
 			case hasSegment(r.URL.Path, "translations"):
@@ -151,6 +170,10 @@ func Setup() http.Handler {
 				http.NotFound(w, r)
 			}
 		})))
+
+		// TTS configuration (admin)
+		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))
+		mux.Handle("GET /api/tts/models", admin(http.HandlerFunc(ttsH.ListModels)))
 
 		mux.Handle("DELETE /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
