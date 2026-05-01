@@ -38,23 +38,29 @@ func (h *StoryHandler) ListCategories(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/stories
 func (h *StoryHandler) ListStories(w http.ResponseWriter, r *http.Request) {
-	playlistID, _ := strconv.Atoi(r.URL.Query().Get("playlist_id"))
+	q := r.URL.Query()
+	playlistID, _ := strconv.Atoi(q.Get("playlist_id"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	sortBy := q.Get("sort_by")
+	if limit <= 0 {
+		limit = 12
+	}
 	userID, err := h.userIDFromContext(r)
 	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	stories, err := h.stories.List(false, playlistID, userID)
+	stories, hasMore, err := h.stories.List(false, playlistID, userID, sortBy, limit, offset)
 	if err != nil {
 		log.Printf("Error listing stories: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("Found %d stories", len(stories))
 	if stories == nil {
 		stories = []model.Story{}
 	}
-	jsonOK(w, stories)
+	jsonOK(w, map[string]interface{}{"stories": stories, "has_more": hasMore})
 }
 
 // GET /api/stories/deleted [admin]

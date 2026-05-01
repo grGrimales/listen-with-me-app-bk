@@ -49,8 +49,8 @@ func (r *StoryRepo) Create(s *model.Story) error {
 	).Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 }
 
-func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string) ([]model.Story, error) {
-	log.Printf("Listing stories (onlyPublished=%v, playlistID=%d)", onlyPublished, playlistID)
+func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string, sortBy string, limit int, offset int) ([]model.Story, bool, error) {
+	log.Printf("Listing stories (onlyPublished=%v, playlistID=%d, sort=%s, limit=%d, offset=%d)", onlyPublished, playlistID, sortBy, limit, offset)
 	query := `
 		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
 		       c.id, c.name, c.slug,
@@ -75,11 +75,26 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string) ([]m
 
 	query += " WHERE " + strings.Join(where, " AND ")
 	query += ` GROUP BY s.id, c.id, c.name, c.slug`
-	query += ` ORDER BY last_reviewed_at ASC NULLS FIRST, review_count ASC`
+
+	switch sortBy {
+	case "most_reviewed":
+		query += ` ORDER BY review_count DESC, s.created_at DESC`
+	case "last_reviewed":
+		query += ` ORDER BY last_reviewed_at DESC NULLS LAST, review_count DESC`
+	case "newest":
+		query += ` ORDER BY s.created_at DESC`
+	default: // least_reviewed
+		query += ` ORDER BY last_reviewed_at ASC NULLS FIRST, review_count ASC`
+	}
+
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
+		args = append(args, limit+1, offset) // fetch one extra to detect hasMore
+	}
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 
@@ -93,7 +108,7 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string) ([]m
 			&cat.ID, &cat.Name, &cat.Slug,
 			&s.ReviewCount, &lastReviewedAt,
 		); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if lastReviewedAt.Valid {
 			s.LastReviewedAt = &lastReviewedAt.Time
@@ -101,7 +116,13 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string) ([]m
 		s.Category = &cat
 		stories = append(stories, s)
 	}
-	return stories, nil
+
+	hasMore := false
+	if limit > 0 && len(stories) > limit {
+		hasMore = true
+		stories = stories[:limit]
+	}
+	return stories, hasMore, nil
 }
 
 func (r *StoryRepo) ListDeleted() ([]model.Story, error) {
