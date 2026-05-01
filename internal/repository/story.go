@@ -741,13 +741,12 @@ func (r *StoryRepo) UpdatePlaylist(p *model.Playlist) error {
 }
 
 func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
-	// Simplified query to avoid complex joins and potential type issues with UUID in subqueries
 	rows, err := r.db.Query(`
-		SELECT p.id, p.user_id, p.name, p.description, p.created_at, p.updated_at,
+		SELECT p.id, p.user_id, p.name, p.description, p.is_favorite, p.created_at, p.updated_at,
 		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) as story_count
 		FROM playlists p
 		WHERE p.user_id = $1::uuid
-		ORDER BY p.created_at DESC`, userID)
+		ORDER BY p.is_favorite DESC, p.created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -756,12 +755,20 @@ func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
 	var list []model.Playlist = []model.Playlist{}
 	for rows.Next() {
 		var p model.Playlist
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.IsFavorite, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount); err != nil {
 			return nil, err
 		}
 		list = append(list, p)
 	}
 	return list, nil
+}
+
+func (r *StoryRepo) SetPlaylistFavorite(id int, userID string, isFavorite bool) error {
+	_, err := r.db.Exec(
+		`UPDATE playlists SET is_favorite = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3`,
+		isFavorite, id, userID,
+	)
+	return err
 }
 
 func (r *StoryRepo) DeletePlaylist(id int, userID string) error {

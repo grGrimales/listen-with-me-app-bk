@@ -735,6 +735,32 @@ func (h *StoryHandler) DeletePlaylist(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
+func (h *StoryHandler) SetPlaylistFavorite(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/playlists/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		IsFavorite bool `json:"is_favorite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.SetPlaylistFavorite(id, userID, req.IsFavorite); err != nil {
+		log.Printf("Error setting favorite for playlist %d: %v", id, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"is_favorite": req.IsFavorite})
+}
+
 func (h *StoryHandler) AddStoryToPlaylist(w http.ResponseWriter, r *http.Request) {
 	pID, err := pathID(r, "/api/playlists/")
 	if err != nil {

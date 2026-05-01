@@ -108,6 +108,7 @@ func Setup() http.Handler {
 		mux.Handle("POST /api/playlists", middleware.Auth(http.HandlerFunc(storyH.CreatePlaylist)))
 		mux.Handle("PUT /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.UpdatePlaylist)))
 		mux.Handle("DELETE /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.DeletePlaylist)))
+		mux.Handle("PATCH /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.SetPlaylistFavorite)))
 		mux.Handle("POST /api/playlists/{id}/stories", middleware.Auth(http.HandlerFunc(storyH.AddStoryToPlaylist)))
 		mux.Handle("DELETE /api/playlists/{id}/stories/", middleware.Auth(http.HandlerFunc(storyH.RemoveStoryFromPlaylist)))
 		mux.Handle("POST /api/stories/{id}/review", middleware.Auth(http.HandlerFunc(storyH.MarkAsReviewed)))
@@ -241,7 +242,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			origin = origin[:len(origin)-1]
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
