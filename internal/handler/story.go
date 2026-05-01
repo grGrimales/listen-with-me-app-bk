@@ -684,8 +684,9 @@ func (h *StoryHandler) CreatePlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	jsonOK(w, p)
+	json.NewEncoder(w).Encode(p)
 }
 
 func (h *StoryHandler) UpdatePlaylist(w http.ResponseWriter, r *http.Request) {
@@ -840,8 +841,9 @@ func (h *StoryHandler) AddUserVocabulary(w http.ResponseWriter, r *http.Request)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	jsonOK(w, v)
+	json.NewEncoder(w).Encode(v)
 }
 
 // GET /api/stories/{id}/vocabulary
