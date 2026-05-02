@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"listen-with-me/backend/internal/model"
 )
@@ -669,57 +670,76 @@ func (r *StoryRepo) GetUserStats(userID string) (*model.UserStats, error) {
 		HistorySummary: []model.StorySummary{},
 	}
 
-	// Total reviews
-	err := r.db.QueryRow(
+	if err := r.db.QueryRow(
 		`SELECT COUNT(*) FROM user_story_reviews WHERE user_id = $1`, userID,
-	).Scan(&stats.TotalReviews)
-	if err != nil {
+	).Scan(&stats.TotalReviews); err != nil {
 		return nil, err
 	}
 
-	// Daily
+	// Daily (last 30 days with activity; frontend fills the gaps)
 	rows, err := r.db.Query(`
-		SELECT TO_CHAR(reviewed_at, 'YYYY-MM-DD') as period, COUNT(*) 
-		FROM user_story_reviews 
-		WHERE user_id = $1 
+		SELECT TO_CHAR(reviewed_at, 'YYYY-MM-DD') as period, COUNT(*)
+		FROM user_story_reviews
+		WHERE user_id = $1
 		GROUP BY period ORDER BY period DESC LIMIT 30`, userID)
-	if err == nil {
+	if err != nil {
+		log.Printf("GetUserStats daily query error: %v", err)
+	} else {
 		for rows.Next() {
 			var p model.StatPeriod
-			rows.Scan(&p.Period, &p.Count)
+			if err := rows.Scan(&p.Period, &p.Count); err != nil {
+				log.Printf("GetUserStats daily scan error: %v", err)
+				continue
+			}
 			stats.DailyReviews = append(stats.DailyReviews, p)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			log.Printf("GetUserStats daily rows error: %v", err)
+		}
 	}
 
 	// Monthly
 	rows, err = r.db.Query(`
-		SELECT TO_CHAR(reviewed_at, 'YYYY-MM') as period, COUNT(*) 
-		FROM user_story_reviews 
-		WHERE user_id = $1 
+		SELECT TO_CHAR(reviewed_at, 'YYYY-MM') as period, COUNT(*)
+		FROM user_story_reviews
+		WHERE user_id = $1
 		GROUP BY period ORDER BY period DESC`, userID)
-	if err == nil {
+	if err != nil {
+		log.Printf("GetUserStats monthly query error: %v", err)
+	} else {
 		for rows.Next() {
 			var p model.StatPeriod
-			rows.Scan(&p.Period, &p.Count)
+			if err := rows.Scan(&p.Period, &p.Count); err != nil {
+				log.Printf("GetUserStats monthly scan error: %v", err)
+				continue
+			}
 			stats.MonthlyReviews = append(stats.MonthlyReviews, p)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			log.Printf("GetUserStats monthly rows error: %v", err)
+		}
 	}
 
 	// Yearly
 	rows, err = r.db.Query(`
-		SELECT TO_CHAR(reviewed_at, 'YYYY') as period, COUNT(*) 
-		FROM user_story_reviews 
-		WHERE user_id = $1 
+		SELECT TO_CHAR(reviewed_at, 'YYYY') as period, COUNT(*)
+		FROM user_story_reviews
+		WHERE user_id = $1
 		GROUP BY period ORDER BY period DESC`, userID)
-	if err == nil {
+	if err != nil {
+		log.Printf("GetUserStats yearly query error: %v", err)
+	} else {
 		for rows.Next() {
 			var p model.StatPeriod
-			rows.Scan(&p.Period, &p.Count)
+			if err := rows.Scan(&p.Period, &p.Count); err != nil {
+				log.Printf("GetUserStats yearly scan error: %v", err)
+				continue
+			}
 			stats.YearlyReviews = append(stats.YearlyReviews, p)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			log.Printf("GetUserStats yearly rows error: %v", err)
+		}
 	}
 
 	// History by Story
@@ -730,13 +750,59 @@ func (r *StoryRepo) GetUserStats(userID string) (*model.UserStats, error) {
 		WHERE r.user_id = $1
 		GROUP BY s.id, s.title
 		ORDER BY MAX(r.reviewed_at) DESC`, userID)
-	if err == nil {
+	if err != nil {
+		log.Printf("GetUserStats history query error: %v", err)
+	} else {
 		for rows.Next() {
 			var s model.StorySummary
-			rows.Scan(&s.StoryID, &s.Title, &s.ReviewCount, &s.LastReviewed)
+			if err := rows.Scan(&s.StoryID, &s.Title, &s.ReviewCount, &s.LastReviewed); err != nil {
+				log.Printf("GetUserStats history scan error: %v", err)
+				continue
+			}
 			stats.HistorySummary = append(stats.HistorySummary, s)
 		}
+		if err := rows.Close(); err != nil {
+			log.Printf("GetUserStats history rows error: %v", err)
+		}
+	}
+
+	// Streak: consecutive days with at least one review ending today or yesterday
+	rows, err = r.db.Query(`
+		SELECT TO_CHAR(reviewed_at, 'YYYY-MM-DD')
+		FROM user_story_reviews
+		WHERE user_id = $1
+		GROUP BY TO_CHAR(reviewed_at, 'YYYY-MM-DD')
+		ORDER BY 1 DESC`, userID)
+	if err != nil {
+		log.Printf("GetUserStats streak query error: %v", err)
+	} else {
+		var dates []string
+		for rows.Next() {
+			var d string
+			if err := rows.Scan(&d); err != nil {
+				log.Printf("GetUserStats streak scan error: %v", err)
+				continue
+			}
+			dates = append(dates, d)
+		}
 		rows.Close()
+
+		if len(dates) > 0 {
+			today := time.Now().UTC().Format("2006-01-02")
+			yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+			// Streak must start from today or yesterday to be active
+			if dates[0] == today || dates[0] == yesterday {
+				expected := dates[0]
+				for _, d := range dates {
+					if d != expected {
+						break
+					}
+					stats.Streak++
+					t, _ := time.Parse("2006-01-02", expected)
+					expected = t.AddDate(0, 0, -1).Format("2006-01-02")
+				}
+			}
+		}
 	}
 
 	return stats, nil

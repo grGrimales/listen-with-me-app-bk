@@ -165,11 +165,12 @@ type AddUserVocabularyRequest struct {
 }
 
 type UserStats struct {
-	TotalReviews    int            `json:"total_reviews"`
-	DailyReviews    []StatPeriod   `json:"daily_reviews"`
-	MonthlyReviews  []StatPeriod   `json:"monthly_reviews"`
-	YearlyReviews   []StatPeriod   `json:"yearly_reviews"`
-	HistorySummary  []StorySummary `json:"history_summary"`
+	TotalReviews   int            `json:"total_reviews"`
+	Streak         int            `json:"streak"`
+	DailyReviews   []StatPeriod   `json:"daily_reviews"`
+	MonthlyReviews []StatPeriod   `json:"monthly_reviews"`
+	YearlyReviews  []StatPeriod   `json:"yearly_reviews"`
+	HistorySummary []StorySummary `json:"history_summary"`
 }
 
 type StatPeriod struct {
