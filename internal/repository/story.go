@@ -78,13 +78,13 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string, sort
 
 	switch sortBy {
 	case "most_reviewed":
-		query += ` ORDER BY review_count DESC, s.created_at DESC`
+		query += ` ORDER BY review_count DESC, last_reviewed_at DESC NULLS LAST, s.id ASC`
 	case "last_reviewed":
-		query += ` ORDER BY last_reviewed_at DESC NULLS LAST, review_count DESC`
+		query += ` ORDER BY last_reviewed_at DESC NULLS LAST, review_count DESC, s.id ASC`
 	case "newest":
-		query += ` ORDER BY s.created_at DESC`
+		query += ` ORDER BY s.created_at DESC, s.id ASC`
 	default: // least_reviewed
-		query += ` ORDER BY last_reviewed_at ASC NULLS FIRST, review_count ASC`
+		query += ` ORDER BY review_count ASC, last_reviewed_at ASC NULLS FIRST, s.id ASC`
 	}
 
 	if limit > 0 {
@@ -879,11 +879,11 @@ func (r *StoryRepo) ListZen(userID string, playlistID, limit int, sort string) (
 
 	switch sort {
 	case "newest":
-		query += ` ORDER BY s.created_at DESC`
+		query += ` ORDER BY s.created_at DESC, s.id ASC`
 	case "oldest":
-		query += ` ORDER BY s.created_at ASC`
+		query += ` ORDER BY s.created_at ASC, s.id ASC`
 	case "least_played":
-		query += ` ORDER BY COUNT(DISTINCT r.id) ASC, s.created_at ASC`
+		query += ` ORDER BY review_count ASC, last_reviewed_at ASC NULLS FIRST, s.id ASC`
 	default:
 		query += ` ORDER BY RANDOM()`
 	}
