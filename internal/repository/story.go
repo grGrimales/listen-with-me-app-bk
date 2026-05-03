@@ -925,11 +925,10 @@ func (r *StoryRepo) ListZen(userID string, playlistID, limit int, sort string) (
 	query := `
 		SELECT s.id, s.title, s.level, s.cover_url, s.author, s.status, s.created_at, s.updated_at,
 		       c.id, c.name, c.slug,
-		       COUNT(DISTINCT r.id) AS review_count,
-		       MAX(r.reviewed_at) AS last_reviewed_at
+		       (SELECT COUNT(*) FROM zen_listens z WHERE z.story_id = s.id AND z.user_id = $1) AS review_count,
+		       (SELECT MAX(listened_at) FROM zen_listens z WHERE z.story_id = s.id AND z.user_id = $1) AS last_reviewed_at
 		FROM stories s
-		JOIN categories c ON c.id = s.category_id
-		LEFT JOIN user_story_reviews r ON r.story_id = s.id AND r.user_id = $1`
+		JOIN categories c ON c.id = s.category_id`
 
 	args := []interface{}{userID}
 	where := []string{"s.status != 'deleted'"}
