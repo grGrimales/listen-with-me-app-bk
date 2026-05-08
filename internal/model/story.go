@@ -204,3 +204,36 @@ type CreatePlaylistRequest struct {
 type AddStoryToPlaylistRequest struct {
 	StoryID int `json:"story_id"`
 }
+
+type StorySentence struct {
+	ID          int       `json:"id"`
+	StoryID     int       `json:"story_id"`
+	ParagraphID *int      `json:"paragraph_id"`
+	En          string    `json:"en"`
+	Es          string    `json:"es"`
+	Position    int       `json:"position"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type UserSentenceAttempt struct {
+	ID         int       `json:"id"`
+	UserID     string    `json:"user_id"`
+	SentenceID int       `json:"sentence_id"`
+	IsCorrect  bool      `json:"is_correct"`
+	UserAnswer string    `json:"user_answer,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type EvaluateSentenceRequest struct {
+	IsCorrect  bool   `json:"is_correct"`
+	UserAnswer string `json:"user_answer"`
+}
+
+type SentenceStats struct {
+	SentenceID    int    `json:"sentence_id"`
+	En            string `json:"en"`
+	Es            string `json:"es"`
+	CorrectCount  int    `json:"correct_count"`
+	FailedCount   int    `json:"failed_count"`
+	TotalAttempts int    `json:"total_attempts"`
+}

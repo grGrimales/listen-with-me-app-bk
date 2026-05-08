@@ -992,3 +992,131 @@ func (r *StoryRepo) LogZenListen(userID string, storyID int) error {
 	)
 	return err
 }
+
+// --- Sentences ---
+
+func (r *StoryRepo) AddSentences(sentences []model.StorySentence) error {
+	if len(sentences) == 0 {
+		return nil
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`DELETE FROM story_sentences WHERE story_id = $1`, sentences[0].StoryID)
+	if err != nil {
+		return err
+	}
+
+	for _, s := range sentences {
+		_, err = tx.Exec(
+			`INSERT INTO story_sentences (story_id, paragraph_id, en, es, position)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			s.StoryID, s.ParagraphID, s.En, s.Es, s.Position,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *StoryRepo) ListSentences(storyID int) ([]model.StorySentence, error) {
+	rows, err := r.db.Query(
+		`SELECT id, story_id, paragraph_id, en, es, position, created_at
+		 FROM story_sentences WHERE story_id = $1 ORDER BY position`,
+		storyID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []model.StorySentence = []model.StorySentence{}
+	for rows.Next() {
+		var s model.StorySentence
+		if err := rows.Scan(&s.ID, &s.StoryID, &s.ParagraphID, &s.En, &s.Es, &s.Position, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, s)
+	}
+	return list, nil
+}
+
+func (r *StoryRepo) GetSentenceByID(id int) (*model.StorySentence, error) {
+	s := &model.StorySentence{}
+	err := r.db.QueryRow(
+		`SELECT id, story_id, paragraph_id, en, es, position, created_at
+		 FROM story_sentences WHERE id = $1`, id,
+	).Scan(&s.ID, &s.StoryID, &s.ParagraphID, &s.En, &s.Es, &s.Position, &s.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (r *StoryRepo) AddSentenceAttempt(a *model.UserSentenceAttempt) error {
+	return r.db.QueryRow(
+		`INSERT INTO user_sentence_attempts (user_id, sentence_id, is_correct, user_answer)
+		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+		a.UserID, a.SentenceID, a.IsCorrect, a.UserAnswer,
+	).Scan(&a.ID, &a.CreatedAt)
+}
+
+func (r *StoryRepo) GetSentenceStats(userID string, storyID int) ([]model.SentenceStats, error) {
+	rows, err := r.db.Query(`
+		SELECT s.id, s.en, s.es,
+		       COUNT(a.id) FILTER (WHERE a.is_correct = true) as correct_count,
+		       COUNT(a.id) FILTER (WHERE a.is_correct = false) as failed_count,
+		       COUNT(a.id) as total_attempts
+		FROM story_sentences s
+		LEFT JOIN user_sentence_attempts a ON a.sentence_id = s.id AND a.user_id = $1
+		WHERE s.story_id = $2
+		GROUP BY s.id, s.en, s.es, s.position
+		ORDER BY s.position`,
+		userID, storyID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []model.SentenceStats = []model.SentenceStats{}
+	for rows.Next() {
+		var s model.SentenceStats
+		if err := rows.Scan(&s.SentenceID, &s.En, &s.Es, &s.CorrectCount, &s.FailedCount, &s.TotalAttempts); err != nil {
+			return nil, err
+		}
+		list = append(list, s)
+	}
+	return list, nil
+}
+
+func (r *StoryRepo) GetSentenceHistory(userID string, sentenceID int) ([]model.UserSentenceAttempt, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, sentence_id, is_correct, COALESCE(user_answer, ''), created_at
+		 FROM user_sentence_attempts
+		 WHERE user_id = $1 AND sentence_id = $2
+		 ORDER BY created_at DESC`,
+		userID, sentenceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []model.UserSentenceAttempt = []model.UserSentenceAttempt{}
+	for rows.Next() {
+		var a model.UserSentenceAttempt
+		if err := rows.Scan(&a.ID, &a.UserID, &a.SentenceID, &a.IsCorrect, &a.UserAnswer, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, a)
+	}
+	return list, nil
+}

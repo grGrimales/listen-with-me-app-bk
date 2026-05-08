@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"listen-with-me/backend/internal/gemini"
 	"listen-with-me/backend/internal/middleware"
 	"listen-with-me/backend/internal/model"
 	"listen-with-me/backend/internal/repository"
@@ -20,10 +21,11 @@ import (
 type StoryHandler struct {
 	stories *repository.StoryRepo
 	storage storage.FileStorage
+	gemini  *gemini.GeminiClient
 }
 
-func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage) *StoryHandler {
-	return &StoryHandler{stories: stories, storage: storage}
+func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage, gemini *gemini.GeminiClient) *StoryHandler {
+	return &StoryHandler{stories: stories, storage: storage, gemini: gemini}
 }
 
 // GET /api/categories
@@ -482,10 +484,10 @@ func (h *StoryHandler) UploadParagraphImage(w http.ResponseWriter, r *http.Reque
 	jsonOK(w, img)
 }
 
-// DELETE /api/paragraphs/images/{id} [admin]
+// DELETE /api/paragraph-images/{id} [admin]
 func (h *StoryHandler) DeleteParagraphImage(w http.ResponseWriter, r *http.Request) {
-	// Note: we use /api/paragraphs/images/ prefix to get the image ID
-	id, err := pathID(r, "/api/paragraphs/images/")
+	// Note: we use /api/paragraph-images/ prefix to get the image ID
+	id, err := pathID(r, "/api/paragraph-images/")
 	if err != nil {
 		jsonError(w, "invalid id", http.StatusBadRequest)
 		return
@@ -935,4 +937,226 @@ func (h *StoryHandler) LogZenListen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "logged"})
+}
+
+// --- Sentences & Evaluation ---
+
+// POST /api/stories/{id}/sentences/preview [admin]
+func (h *StoryHandler) PreviewSentences(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	story, err := h.stories.GetByID(id)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if story == nil {
+		jsonError(w, "story not found", http.StatusNotFound)
+		return
+	}
+
+	var fullContent strings.Builder
+	for _, p := range story.Paragraphs {
+		fullContent.WriteString(p.Content)
+		fullContent.WriteString("\n\n")
+	}
+
+	geminiSentences, err := h.gemini.SplitStory(fullContent.String())
+	if err != nil {
+		log.Printf("Gemini SplitStory error: %v", err)
+		jsonError(w, "failed to generate sentences: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, geminiSentences)
+}
+
+// POST /api/stories/{id}/sentences [admin]
+func (h *StoryHandler) SaveSentences(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var reqSentences []struct {
+		En string `json:"en"`
+		Es string `json:"es"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqSentences); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	var sentences []model.StorySentence
+	for i, s := range reqSentences {
+		sentences = append(sentences, model.StorySentence{
+			StoryID:  id,
+			En:       s.En,
+			Es:       s.Es,
+			Position: i,
+		})
+	}
+
+	if err := h.stories.AddSentences(sentences); err != nil {
+		log.Printf("AddSentences error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, sentences)
+}
+
+// POST /api/stories/{id}/sentences/generate [admin]
+func (h *StoryHandler) GenerateSentences(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	story, err := h.stories.GetByID(id)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if story == nil {
+		jsonError(w, "story not found", http.StatusNotFound)
+		return
+	}
+
+	var fullContent strings.Builder
+	for _, p := range story.Paragraphs {
+		fullContent.WriteString(p.Content)
+		fullContent.WriteString("\n\n")
+	}
+
+	geminiSentences, err := h.gemini.SplitStory(fullContent.String())
+	if err != nil {
+		log.Printf("Gemini SplitStory error: %v", err)
+		jsonError(w, "failed to generate sentences: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var sentences []model.StorySentence
+	for i, s := range geminiSentences {
+		sentences = append(sentences, model.StorySentence{
+			StoryID:  id,
+			En:       s.En,
+			Es:       s.Es,
+			Position: i,
+		})
+	}
+
+	if err := h.stories.AddSentences(sentences); err != nil {
+		log.Printf("AddSentences error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, sentences)
+}
+
+// GET /api/stories/{id}/sentences
+func (h *StoryHandler) ListSentences(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	list, err := h.stories.ListSentences(id)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if list == nil {
+		list = []model.StorySentence{}
+	}
+	jsonOK(w, list)
+}
+
+// POST /api/sentences/{id}/evaluate
+func (h *StoryHandler) EvaluateSentence(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/sentences/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req model.EvaluateSentenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	attempt := &model.UserSentenceAttempt{
+		UserID:     userID,
+		SentenceID: id,
+		IsCorrect:  req.IsCorrect,
+		UserAnswer: req.UserAnswer,
+	}
+
+	if err := h.stories.AddSentenceAttempt(attempt); err != nil {
+		log.Printf("AddSentenceAttempt error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, attempt)
+}
+
+// GET /api/stories/{id}/sentences/stats
+func (h *StoryHandler) GetStorySentenceStats(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	stats, err := h.stories.GetSentenceStats(userID, id)
+	if err != nil {
+		log.Printf("GetSentenceStats error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if stats == nil {
+		stats = []model.SentenceStats{}
+	}
+	jsonOK(w, stats)
+}
+
+// GET /api/sentences/{id}/history
+func (h *StoryHandler) GetSentenceHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/sentences/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	history, err := h.stories.GetSentenceHistory(userID, id)
+	if err != nil {
+		log.Printf("GetSentenceHistory error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if history == nil {
+		history = []model.UserSentenceAttempt{}
+	}
+	jsonOK(w, history)
 }

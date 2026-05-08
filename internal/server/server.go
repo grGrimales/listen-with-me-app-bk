@@ -15,6 +15,7 @@ import (
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
 	"listen-with-me/backend/internal/tts/elevenlabs"
+	"listen-with-me/backend/internal/gemini"
 )
 
 var (
@@ -78,8 +79,11 @@ func Setup() http.Handler {
 		elevenlabsAPIKey := os.Getenv("ELEVENLABS_API_KEY")
 		ttsProvider := elevenlabs.New(elevenlabsAPIKey)
 
+		geminiAPIKey := os.Getenv("GEMINI_API_KEY")
+		geminiClient := gemini.NewClient(geminiAPIKey)
+
 		authH := handler.NewAuthHandler(userRepo)
-		storyH := handler.NewStoryHandler(storyRepo, audioStorage)
+		storyH := handler.NewStoryHandler(storyRepo, audioStorage, geminiClient)
 		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
 
 		mux := http.NewServeMux()
@@ -103,74 +107,56 @@ func Setup() http.Handler {
 		mux.Handle("GET /api/admin/stories/trash-items", admin(http.HandlerFunc(storyH.ListDeletedStories)))
 		mux.Handle("GET /api/categories", middleware.Auth(http.HandlerFunc(storyH.ListCategories)))
 		mux.Handle("GET /api/stories", middleware.Auth(http.HandlerFunc(storyH.ListStories)))
-		mux.Handle("PUT /api/stories/", admin(storyH.UpdateStory))
-		mux.Handle("DELETE /api/stories/", admin(storyH.DeleteStory))
-		mux.Handle("POST /api/playlists", middleware.Auth(http.HandlerFunc(storyH.CreatePlaylist)))
-		mux.Handle("PUT /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.UpdatePlaylist)))
-		mux.Handle("DELETE /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.DeletePlaylist)))
-		mux.Handle("PATCH /api/playlists/", middleware.Auth(http.HandlerFunc(storyH.SetPlaylistFavorite)))
-		mux.Handle("POST /api/playlists/{id}/stories", middleware.Auth(http.HandlerFunc(storyH.AddStoryToPlaylist)))
-		mux.Handle("DELETE /api/playlists/{id}/stories/", middleware.Auth(http.HandlerFunc(storyH.RemoveStoryFromPlaylist)))
-		mux.Handle("POST /api/stories/{id}/review", middleware.Auth(http.HandlerFunc(storyH.MarkAsReviewed)))
+		
+		// Story CRUD and sub-resources
 		mux.Handle("POST /api/stories", admin(storyH.CreateStory))
 		mux.Handle("POST /api/stories/full", admin(storyH.CreateFull))
-		mux.Handle("DELETE /api/stories/vocabulary/", middleware.Auth(http.HandlerFunc(storyH.DeleteUserVocabulary)))
+		mux.Handle("GET /api/stories/{id}", middleware.Auth(http.HandlerFunc(storyH.GetStory)))
+		mux.Handle("PUT /api/stories/{id}", admin(storyH.UpdateStory))
+		mux.Handle("DELETE /api/stories/{id}", admin(storyH.DeleteStory))
 		
-		mux.Handle("POST /api/stories/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Some routes are admin, some are auth
-			switch {
-			case hasSegment(r.URL.Path, "vocabulary"):
-				middleware.Auth(http.HandlerFunc(storyH.AddUserVocabulary)).ServeHTTP(w, r)
-			case hasSegment(r.URL.Path, "voices") && hasSegment(r.URL.Path, "upload"):
-				admin(storyH.UploadVoiceAudio).ServeHTTP(w, r)
-			case hasSegment(r.URL.Path, "paragraphs"):
-				admin(storyH.AddParagraph).ServeHTTP(w, r)
-			case hasSegment(r.URL.Path, "voices"):
-				admin(storyH.AddVoice).ServeHTTP(w, r)
-			case hasSegment(r.URL.Path, "publish"):
-				admin(storyH.PublishStory).ServeHTTP(w, r)
-			case hasSegment(r.URL.Path, "restore"):
-				admin(storyH.RestoreStory).ServeHTTP(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
+		mux.Handle("POST /api/stories/{id}/publish", admin(storyH.PublishStory))
+		mux.Handle("POST /api/stories/{id}/restore", admin(storyH.RestoreStory))
+		mux.Handle("POST /api/stories/{id}/review", middleware.Auth(http.HandlerFunc(storyH.MarkAsReviewed)))
+		
+		// Sentences
+		mux.Handle("POST /api/stories/{id}/sentences/generate", admin(storyH.GenerateSentences))
+		mux.Handle("POST /api/stories/{id}/sentences/preview", admin(storyH.PreviewSentences))
+		mux.Handle("POST /api/stories/{id}/sentences", admin(storyH.SaveSentences))
+		mux.Handle("GET /api/stories/{id}/sentences", middleware.Auth(http.HandlerFunc(storyH.ListSentences)))
+		mux.Handle("GET /api/stories/{id}/sentences/stats", middleware.Auth(http.HandlerFunc(storyH.GetStorySentenceStats)))
+		
+		// Vocabulary
+		mux.Handle("POST /api/stories/{id}/vocabulary", middleware.Auth(http.HandlerFunc(storyH.AddUserVocabulary)))
+		mux.Handle("GET /api/stories/{id}/vocabulary", middleware.Auth(http.HandlerFunc(storyH.ListUserVocabulary)))
+		mux.Handle("DELETE /api/stories/vocabulary/{id}", middleware.Auth(http.HandlerFunc(storyH.DeleteUserVocabulary)))
+		
+		// Voices
+		mux.Handle("POST /api/stories/{id}/voices", admin(storyH.AddVoice))
+		mux.Handle("POST /api/stories/{id}/voices/upload", admin(storyH.UploadVoiceAudio))
+		
+		// Paragraphs
+		mux.Handle("POST /api/stories/{id}/paragraphs", admin(storyH.AddParagraph))
+		mux.Handle("POST /api/paragraphs/{id}/translations", admin(storyH.AddTranslation))
+		mux.Handle("POST /api/paragraphs/{id}/vocabulary", admin(storyH.AddVocabulary))
+		mux.Handle("POST /api/paragraphs/{id}/audio/upload", admin(storyH.UploadParagraphAudio))
+		mux.Handle("POST /api/paragraphs/{id}/audio/generate", admin(http.HandlerFunc(ttsH.GenerateParagraphAudio)))
+		mux.Handle("POST /api/paragraphs/{id}/audio/restore", admin(http.HandlerFunc(ttsH.RestoreParagraphAudio)))
+		mux.Handle("POST /api/paragraphs/{id}/images/upload", admin(storyH.UploadParagraphImage))
+		mux.Handle("GET /api/paragraphs/{id}/audio/history", admin(http.HandlerFunc(ttsH.ListParagraphAudioHistory)))
+		mux.Handle("DELETE /api/paragraphs/{id}/audio", admin(storyH.DeleteParagraphAudio))
+		mux.Handle("DELETE /api/paragraph-images/{id}", admin(storyH.DeleteParagraphImage))
 
-		mux.Handle("GET /api/stories/", middleware.Auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if hasSegment(r.URL.Path, "vocabulary") {
-				storyH.ListUserVocabulary(w, r)
-				return
-			}
-			storyH.GetStory(w, r)
-		})))
+		// Playlists
+		mux.Handle("POST /api/playlists", middleware.Auth(http.HandlerFunc(storyH.CreatePlaylist)))
+		mux.Handle("PUT /api/playlists/{id}", middleware.Auth(http.HandlerFunc(storyH.UpdatePlaylist)))
+		mux.Handle("DELETE /api/playlists/{id}", middleware.Auth(http.HandlerFunc(storyH.DeletePlaylist)))
+		mux.Handle("PATCH /api/playlists/{id}", middleware.Auth(http.HandlerFunc(storyH.SetPlaylistFavorite)))
+		mux.Handle("POST /api/playlists/{id}/stories", middleware.Auth(http.HandlerFunc(storyH.AddStoryToPlaylist)))
+		mux.Handle("DELETE /api/playlists/{id}/stories/{storyID}", middleware.Auth(http.HandlerFunc(storyH.RemoveStoryFromPlaylist)))
 
-		mux.Handle("GET /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "history"):
-				ttsH.ListParagraphAudioHistory(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		})))
-
-		mux.Handle("POST /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "upload"):
-				storyH.UploadParagraphAudio(w, r)
-			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "generate"):
-				ttsH.GenerateParagraphAudio(w, r)
-			case hasSegment(r.URL.Path, "audio") && hasSegment(r.URL.Path, "restore"):
-				ttsH.RestoreParagraphAudio(w, r)
-			case hasSegment(r.URL.Path, "images") && hasSegment(r.URL.Path, "upload"):
-				storyH.UploadParagraphImage(w, r)
-			case hasSegment(r.URL.Path, "translations"):
-				storyH.AddTranslation(w, r)
-			case hasSegment(r.URL.Path, "vocabulary"):
-				storyH.AddVocabulary(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		})))
+		mux.Handle("POST /api/sentences/{id}/evaluate", middleware.Auth(http.HandlerFunc(storyH.EvaluateSentence)))
+		mux.Handle("GET /api/sentences/{id}/history", middleware.Auth(http.HandlerFunc(storyH.GetSentenceHistory)))
 
 		// Zen Mode
 		mux.Handle("GET /api/zen/stories", middleware.Auth(http.HandlerFunc(storyH.ListZenStories)))
@@ -179,17 +165,6 @@ func Setup() http.Handler {
 		// TTS configuration (admin)
 		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))
 		mux.Handle("GET /api/tts/models", admin(http.HandlerFunc(ttsH.ListModels)))
-
-		mux.Handle("DELETE /api/paragraphs/", admin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case hasSegment(r.URL.Path, "audio"):
-				storyH.DeleteParagraphAudio(w, r)
-			case hasSegment(r.URL.Path, "images"):
-				storyH.DeleteParagraphImage(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		})))
 
 		handlerInstance = recoveryMiddleware(securityMiddleware(corsMiddleware(mux)))
 	})
