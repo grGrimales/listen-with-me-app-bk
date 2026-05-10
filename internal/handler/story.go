@@ -111,7 +111,25 @@ func (h *StoryHandler) GetStory(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "story not found", http.StatusNotFound)
 		return
 	}
+	if lang := r.URL.Query().Get("lang"); lang != "" && lang != "en" {
+		applyTargetLanguage(story, lang)
+	}
 	jsonOK(w, story)
+}
+
+func applyTargetLanguage(story *model.Story, lang string) {
+	for i := range story.Paragraphs {
+		p := &story.Paragraphs[i]
+		for _, t := range p.Translations {
+			if t.Language == lang {
+				p.Content = t.Content
+				if t.AudioURL != "" {
+					p.AudioURL = t.AudioURL
+				}
+				break
+			}
+		}
+	}
 }
 
 // DELETE /api/stories/{id}  [admin]

@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -566,7 +567,7 @@ func (r *StoryRepo) AddTranslation(t *model.ParagraphTranslation) error {
 
 func (r *StoryRepo) listTranslations(paragraphID int) ([]model.ParagraphTranslation, error) {
 	rows, err := r.db.Query(
-		`SELECT id, paragraph_id, language, content FROM paragraph_translations WHERE paragraph_id = $1`,
+		`SELECT id, paragraph_id, language, content, COALESCE(audio_url, '') FROM paragraph_translations WHERE paragraph_id = $1`,
 		paragraphID,
 	)
 	if err != nil {
@@ -577,12 +578,32 @@ func (r *StoryRepo) listTranslations(paragraphID int) ([]model.ParagraphTranslat
 	var list []model.ParagraphTranslation
 	for rows.Next() {
 		var t model.ParagraphTranslation
-		if err := rows.Scan(&t.ID, &t.ParagraphID, &t.Language, &t.Content); err != nil {
+		if err := rows.Scan(&t.ID, &t.ParagraphID, &t.Language, &t.Content, &t.AudioURL); err != nil {
 			return nil, err
 		}
 		list = append(list, t)
 	}
 	return list, nil
+}
+
+func (r *StoryRepo) GetTranslationByLang(paragraphID int, lang string) (*model.ParagraphTranslation, error) {
+	t := &model.ParagraphTranslation{}
+	err := r.db.QueryRow(
+		`SELECT id, paragraph_id, language, content, COALESCE(audio_url, '') FROM paragraph_translations WHERE paragraph_id = $1 AND language = $2`,
+		paragraphID, lang,
+	).Scan(&t.ID, &t.ParagraphID, &t.Language, &t.Content, &t.AudioURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return t, err
+}
+
+func (r *StoryRepo) SetTranslationAudio(paragraphID int, lang string, url string) error {
+	_, err := r.db.Exec(
+		`UPDATE paragraph_translations SET audio_url = $1 WHERE paragraph_id = $2 AND language = $3`,
+		url, paragraphID, lang,
+	)
+	return err
 }
 
 // --- Vocabulary ---

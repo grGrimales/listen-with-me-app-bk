@@ -8,6 +8,7 @@ type TTSVoice struct {
 	VoiceID     string    `json:"voice_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
+	Language    string    `json:"language"`
 	Enabled     bool      `json:"enabled"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

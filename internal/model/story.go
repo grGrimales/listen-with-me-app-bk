@@ -51,6 +51,7 @@ type ParagraphTranslation struct {
 	ParagraphID int    `json:"paragraph_id"`
 	Language    string `json:"language"`
 	Content     string `json:"content"`
+	AudioURL    string `json:"audio_url,omitempty"`
 }
 
 type Vocabulary struct {

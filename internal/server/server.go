@@ -85,6 +85,7 @@ func Setup() http.Handler {
 		authH := handler.NewAuthHandler(userRepo)
 		storyH := handler.NewStoryHandler(storyRepo, audioStorage, geminiClient)
 		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
+		userH := handler.NewUserHandler(userRepo)
 
 		mux := http.NewServeMux()
 
@@ -161,6 +162,9 @@ func Setup() http.Handler {
 		// Zen Mode
 		mux.Handle("GET /api/zen/stories", middleware.Auth(http.HandlerFunc(storyH.ListZenStories)))
 		mux.Handle("POST /api/zen/listen", middleware.Auth(http.HandlerFunc(storyH.LogZenListen)))
+
+		// User preferences
+		mux.Handle("PUT /api/user/language", middleware.Auth(http.HandlerFunc(userH.UpdateLanguage)))
 
 		// TTS configuration (admin)
 		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))

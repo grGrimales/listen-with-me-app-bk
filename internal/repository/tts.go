@@ -16,10 +16,10 @@ func NewTTSRepo(db *sql.DB) *TTSRepo {
 
 func (r *TTSRepo) ListEnabledVoices() ([]model.TTSVoice, error) {
 	rows, err := r.db.Query(`
-		SELECT id, provider, voice_id, name, description, enabled, created_at, updated_at
+		SELECT id, provider, voice_id, name, description, COALESCE(language,'en'), enabled, created_at, updated_at
 		FROM tts_voices
 		WHERE enabled = TRUE
-		ORDER BY name
+		ORDER BY language, name
 	`)
 	if err != nil {
 		return nil, err
@@ -29,7 +29,7 @@ func (r *TTSRepo) ListEnabledVoices() ([]model.TTSVoice, error) {
 	var voices []model.TTSVoice
 	for rows.Next() {
 		var v model.TTSVoice
-		if err := rows.Scan(&v.ID, &v.Provider, &v.VoiceID, &v.Name, &v.Description, &v.Enabled, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Provider, &v.VoiceID, &v.Name, &v.Description, &v.Language, &v.Enabled, &v.CreatedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		voices = append(voices, v)
@@ -40,9 +40,9 @@ func (r *TTSRepo) ListEnabledVoices() ([]model.TTSVoice, error) {
 func (r *TTSRepo) GetVoiceByID(id string) (*model.TTSVoice, error) {
 	var v model.TTSVoice
 	err := r.db.QueryRow(`
-		SELECT id, provider, voice_id, name, description, enabled, created_at, updated_at
+		SELECT id, provider, voice_id, name, description, COALESCE(language,'en'), enabled, created_at, updated_at
 		FROM tts_voices WHERE id = $1
-	`, id).Scan(&v.ID, &v.Provider, &v.VoiceID, &v.Name, &v.Description, &v.Enabled, &v.CreatedAt, &v.UpdatedAt)
+	`, id).Scan(&v.ID, &v.Provider, &v.VoiceID, &v.Name, &v.Description, &v.Language, &v.Enabled, &v.CreatedAt, &v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

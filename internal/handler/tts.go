@@ -56,8 +56,9 @@ func (h *TTSHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type generateAudioRequest struct {
-	VoiceID string `json:"voice_id"` // UUID from tts_voices table
-	ModelID string `json:"model_id"` // provider model ID
+	VoiceID  string `json:"voice_id"` // UUID from tts_voices table
+	ModelID  string `json:"model_id"` // provider model ID
+	Language string `json:"language"` // "en" (default) or "pt"
 }
 
 // POST /api/paragraphs/{id}/audio/generate [admin]
@@ -76,6 +77,9 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 	if req.VoiceID == "" || req.ModelID == "" {
 		jsonError(w, "voice_id and model_id are required", http.StatusBadRequest)
 		return
+	}
+	if req.Language == "" {
+		req.Language = "en"
 	}
 
 	voice, err := h.ttsRepo.GetVoiceByID(req.VoiceID)
@@ -100,14 +104,31 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	result, err := h.provider.GenerateAudio(r.Context(), paragraph.Content, voice.VoiceID, req.ModelID)
+	var textToGenerate string
+	if req.Language == "en" {
+		textToGenerate = paragraph.Content
+	} else {
+		trans, err := h.stories.GetTranslationByLang(paragraphID, req.Language)
+		if err != nil {
+			log.Printf("tts get translation error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if trans == nil {
+			jsonError(w, "no translation found for language: "+req.Language, http.StatusNotFound)
+			return
+		}
+		textToGenerate = trans.Content
+	}
+
+	result, err := h.provider.GenerateAudio(r.Context(), textToGenerate, voice.VoiceID, req.ModelID)
 	if err != nil {
 		log.Printf("tts generate audio error: %v", err)
 		jsonError(w, "audio generation failed", http.StatusBadGateway)
 		return
 	}
 
-	filename := fmt.Sprintf("audio/tts_%d_%d.mp3", paragraphID, time.Now().UnixNano())
+	filename := fmt.Sprintf("audio/tts_%d_%s_%d.mp3", paragraphID, req.Language, time.Now().UnixNano())
 	audioURL, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(result.Data), result.ContentType)
 	if err != nil {
 		log.Printf("tts upload audio error: %v", err)
@@ -119,10 +140,18 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 		log.Printf("tts insert history error: %v", err)
 	}
 
-	if err := h.stories.SetParagraphAudio(paragraphID, audioURL); err != nil {
-		log.Printf("tts set paragraph audio error: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
+	if req.Language == "en" {
+		if err := h.stories.SetParagraphAudio(paragraphID, audioURL); err != nil {
+			log.Printf("tts set paragraph audio error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := h.stories.SetTranslationAudio(paragraphID, req.Language, audioURL); err != nil {
+			log.Printf("tts set translation audio error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	jsonOK(w, map[string]string{"audio_url": audioURL})
