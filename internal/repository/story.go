@@ -85,6 +85,8 @@ func (r *StoryRepo) List(onlyPublished bool, playlistID int, userID string, sort
 		query += ` ORDER BY last_reviewed_at DESC NULLS LAST, review_count DESC, s.id ASC`
 	case "newest":
 		query += ` ORDER BY s.created_at DESC, s.id ASC`
+	case "random":
+		query += ` ORDER BY RANDOM()`
 	default: // least_reviewed
 		query += ` ORDER BY review_count ASC, last_reviewed_at ASC NULLS FIRST, s.id ASC`
 	}
