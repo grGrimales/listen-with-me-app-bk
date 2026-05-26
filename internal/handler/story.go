@@ -887,6 +887,33 @@ func (h *StoryHandler) ListUserVocabulary(w http.ResponseWriter, r *http.Request
 	jsonOK(w, list)
 }
 
+// PATCH /api/stories/{id}/vocabulary/reorder
+func (h *StoryHandler) ReorderUserVocabulary(w http.ResponseWriter, r *http.Request) {
+	storyID, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		IDs []int `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.ReorderUserVocabulary(userID, storyID, req.IDs); err != nil {
+		log.Printf("ReorderUserVocabulary error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 // DELETE /api/stories/vocabulary/{id}
 func (h *StoryHandler) DeleteUserVocabulary(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r, "/api/stories/vocabulary/")

@@ -907,18 +907,24 @@ func (r *StoryRepo) RemoveStoryFromPlaylist(playlistID, storyID int) error {
 
 func (r *StoryRepo) AddUserVocabulary(v *model.UserVocabulary) error {
 	return r.db.QueryRow(
-		`INSERT INTO user_story_vocabulary (user_id, story_id, phrase)
-		 VALUES ($1, $2, $3) RETURNING id, created_at`,
+		`WITH next_pos AS (
+		   SELECT COALESCE(MAX(position), -1) + 1 AS pos
+		   FROM user_story_vocabulary
+		   WHERE user_id = $1 AND story_id = $2
+		 )
+		 INSERT INTO user_story_vocabulary (user_id, story_id, phrase, position)
+		 SELECT $1, $2, $3, pos FROM next_pos
+		 RETURNING id, position, created_at`,
 		v.UserID, v.StoryID, v.Phrase,
-	).Scan(&v.ID, &v.CreatedAt)
+	).Scan(&v.ID, &v.Position, &v.CreatedAt)
 }
 
 func (r *StoryRepo) ListUserVocabulary(userID string, storyID int) ([]model.UserVocabulary, error) {
 	rows, err := r.db.Query(
-		`SELECT id, user_id, story_id, phrase, created_at
+		`SELECT id, user_id, story_id, phrase, position, created_at
 		 FROM user_story_vocabulary
 		 WHERE user_id = $1 AND story_id = $2
-		 ORDER BY created_at DESC`,
+		 ORDER BY position ASC`,
 		userID, storyID,
 	)
 	if err != nil {
@@ -929,12 +935,30 @@ func (r *StoryRepo) ListUserVocabulary(userID string, storyID int) ([]model.User
 	var list []model.UserVocabulary = []model.UserVocabulary{}
 	for rows.Next() {
 		var v model.UserVocabulary
-		if err := rows.Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.Position, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, v)
 	}
 	return list, nil
+}
+
+func (r *StoryRepo) ReorderUserVocabulary(userID string, storyID int, ids []int) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for pos, id := range ids {
+		if _, err := tx.Exec(
+			`UPDATE user_story_vocabulary SET position = $1
+			 WHERE id = $2 AND user_id = $3 AND story_id = $4`,
+			pos, id, userID, storyID,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *StoryRepo) DeleteUserVocabulary(id int, userID string) error {

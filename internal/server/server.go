@@ -131,6 +131,7 @@ func Setup() http.Handler {
 		mux.Handle("POST /api/stories/{id}/vocabulary", middleware.Auth(http.HandlerFunc(storyH.AddUserVocabulary)))
 		mux.Handle("GET /api/stories/{id}/vocabulary", middleware.Auth(http.HandlerFunc(storyH.ListUserVocabulary)))
 		mux.Handle("DELETE /api/stories/vocabulary/{id}", middleware.Auth(http.HandlerFunc(storyH.DeleteUserVocabulary)))
+		mux.Handle("PATCH /api/stories/{id}/vocabulary/reorder", middleware.Auth(http.HandlerFunc(storyH.ReorderUserVocabulary)))
 		
 		// Voices
 		mux.Handle("POST /api/stories/{id}/voices", admin(storyH.AddVoice))
