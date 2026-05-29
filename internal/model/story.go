@@ -159,6 +159,7 @@ type UserVocabulary struct {
 	StoryID   int       `json:"story_id"`
 	Phrase    string    `json:"phrase"`
 	Position  int       `json:"position"`
+	AudioURL  string    `json:"audio_url"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

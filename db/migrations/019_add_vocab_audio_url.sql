@@ -1,0 +1,2 @@
+ALTER TABLE user_story_vocabulary
+ADD COLUMN IF NOT EXISTS audio_url TEXT NOT NULL DEFAULT '';

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,16 +17,23 @@ import (
 	"listen-with-me/backend/internal/model"
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
+	"listen-with-me/backend/internal/tts"
 )
 
 type StoryHandler struct {
-	stories *repository.StoryRepo
-	storage storage.FileStorage
-	gemini  *gemini.GeminiClient
+	stories  *repository.StoryRepo
+	storage  storage.FileStorage
+	gemini   *gemini.GeminiClient
+	vocabTTS tts.Provider
 }
 
 func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage, gemini *gemini.GeminiClient) *StoryHandler {
 	return &StoryHandler{stories: stories, storage: storage, gemini: gemini}
+}
+
+func (h *StoryHandler) WithVocabTTS(p tts.Provider) *StoryHandler {
+	h.vocabTTS = p
+	return h
 }
 
 // GET /api/categories
@@ -932,6 +940,73 @@ func (h *StoryHandler) DeleteUserVocabulary(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	jsonOK(w, map[string]string{"status": "deleted"})
+}
+
+// vocabVoiceID maps target language to Google Neural2 voice.
+var vocabVoiceID = map[string]string{
+	"en": "en-US-Neural2-C",
+	"pt": "pt-BR-Neural2-A",
+}
+
+// POST /api/stories/vocabulary/{id}/audio?lang=en
+func (h *StoryHandler) GenerateVocabAudio(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "/api/stories/vocabulary/")
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	vocab, err := h.stories.GetUserVocabByID(id, userID)
+	if err != nil {
+		jsonError(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Return cached audio immediately
+	if vocab.AudioURL != "" {
+		jsonOK(w, map[string]string{"audio_url": vocab.AudioURL})
+		return
+	}
+
+	if h.vocabTTS == nil {
+		jsonError(w, "TTS not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	lang := r.URL.Query().Get("lang")
+	if lang == "" {
+		lang = "en"
+	}
+	voiceID, ok := vocabVoiceID[lang]
+	if !ok {
+		voiceID = vocabVoiceID["en"]
+	}
+
+	result, err := h.vocabTTS.GenerateAudio(r.Context(), vocab.Phrase, voiceID, "")
+	if err != nil {
+		log.Printf("GenerateVocabAudio TTS error: %v", err)
+		jsonError(w, "tts error", http.StatusInternalServerError)
+		return
+	}
+
+	filename := fmt.Sprintf("audio/vocab_%d_%s.mp3", id, lang)
+	audioURL, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(result.Data), result.ContentType)
+	if err != nil {
+		log.Printf("GenerateVocabAudio upload error: %v", err)
+		jsonError(w, "upload error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.stories.UpdateVocabAudioURL(id, userID, audioURL); err != nil {
+		log.Printf("GenerateVocabAudio DB update error: %v", err)
+	}
+
+	jsonOK(w, map[string]string{"audio_url": audioURL})
 }
 
 // --- Zen Mode ---

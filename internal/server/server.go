@@ -15,6 +15,7 @@ import (
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
 	"listen-with-me/backend/internal/tts/elevenlabs"
+	"listen-with-me/backend/internal/tts/google"
 	"listen-with-me/backend/internal/gemini"
 )
 
@@ -84,6 +85,9 @@ func Setup() http.Handler {
 
 		authH := handler.NewAuthHandler(userRepo)
 		storyH := handler.NewStoryHandler(storyRepo, audioStorage, geminiClient)
+		if googleKey := os.Getenv("GOOGLE_TTS_API_KEY"); googleKey != "" {
+			storyH = storyH.WithVocabTTS(google.New(googleKey))
+		}
 		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
 		userH := handler.NewUserHandler(userRepo)
 
@@ -132,6 +136,7 @@ func Setup() http.Handler {
 		mux.Handle("GET /api/stories/{id}/vocabulary", middleware.Auth(http.HandlerFunc(storyH.ListUserVocabulary)))
 		mux.Handle("DELETE /api/stories/vocabulary/{id}", middleware.Auth(http.HandlerFunc(storyH.DeleteUserVocabulary)))
 		mux.Handle("PATCH /api/stories/{id}/vocabulary/reorder", middleware.Auth(http.HandlerFunc(storyH.ReorderUserVocabulary)))
+		mux.Handle("POST /api/stories/vocabulary/{id}/audio", middleware.Auth(http.HandlerFunc(storyH.GenerateVocabAudio)))
 		
 		// Voices
 		mux.Handle("POST /api/stories/{id}/voices", admin(storyH.AddVoice))

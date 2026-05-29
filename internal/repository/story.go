@@ -914,14 +914,14 @@ func (r *StoryRepo) AddUserVocabulary(v *model.UserVocabulary) error {
 		 )
 		 INSERT INTO user_story_vocabulary (user_id, story_id, phrase, position)
 		 SELECT $1, $2, $3, pos FROM next_pos
-		 RETURNING id, position, created_at`,
+		 RETURNING id, position, audio_url, created_at`,
 		v.UserID, v.StoryID, v.Phrase,
-	).Scan(&v.ID, &v.Position, &v.CreatedAt)
+	).Scan(&v.ID, &v.Position, &v.AudioURL, &v.CreatedAt)
 }
 
 func (r *StoryRepo) ListUserVocabulary(userID string, storyID int) ([]model.UserVocabulary, error) {
 	rows, err := r.db.Query(
-		`SELECT id, user_id, story_id, phrase, position, created_at
+		`SELECT id, user_id, story_id, phrase, position, audio_url, created_at
 		 FROM user_story_vocabulary
 		 WHERE user_id = $1 AND story_id = $2
 		 ORDER BY position ASC`,
@@ -935,12 +935,33 @@ func (r *StoryRepo) ListUserVocabulary(userID string, storyID int) ([]model.User
 	var list []model.UserVocabulary = []model.UserVocabulary{}
 	for rows.Next() {
 		var v model.UserVocabulary
-		if err := rows.Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.Position, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.Position, &v.AudioURL, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, v)
 	}
 	return list, nil
+}
+
+func (r *StoryRepo) GetUserVocabByID(id int, userID string) (*model.UserVocabulary, error) {
+	var v model.UserVocabulary
+	err := r.db.QueryRow(
+		`SELECT id, user_id, story_id, phrase, position, audio_url, created_at
+		 FROM user_story_vocabulary WHERE id = $1 AND user_id = $2`,
+		id, userID,
+	).Scan(&v.ID, &v.UserID, &v.StoryID, &v.Phrase, &v.Position, &v.AudioURL, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (r *StoryRepo) UpdateVocabAudioURL(id int, userID, audioURL string) error {
+	_, err := r.db.Exec(
+		`UPDATE user_story_vocabulary SET audio_url = $1 WHERE id = $2 AND user_id = $3`,
+		audioURL, id, userID,
+	)
+	return err
 }
 
 func (r *StoryRepo) ReorderUserVocabulary(userID string, storyID int, ids []int) error {
