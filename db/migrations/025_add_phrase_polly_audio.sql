@@ -1,0 +1,1 @@
+ALTER TABLE phrases ADD COLUMN IF NOT EXISTS polly_audio_url TEXT;

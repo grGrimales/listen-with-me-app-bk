@@ -1,0 +1,42 @@
+package main
+
+import (
+	"database/sql"
+	"log"
+	"os"
+
+	"github.com/joho/godotenv"
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+func main() {
+	_ = godotenv.Load()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL not set")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	migration := `
+ALTER TABLE user_story_vocabulary
+ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
+
+WITH ranked AS (
+  SELECT id,
+         ROW_NUMBER() OVER (PARTITION BY user_id, story_id ORDER BY created_at DESC) - 1 AS rn
+  FROM user_story_vocabulary
+)
+UPDATE user_story_vocabulary
+SET position = ranked.rn
+FROM ranked
+WHERE user_story_vocabulary.id = ranked.id;
+`
+	if _, err := db.Exec(migration); err != nil {
+		log.Fatal("migration failed:", err)
+	}
+	log.Println("Migration 018 completed successfully!")
+}

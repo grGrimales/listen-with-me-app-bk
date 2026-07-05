@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"listen-with-me/backend/internal/storage"
 	"listen-with-me/backend/internal/tts/elevenlabs"
 	"listen-with-me/backend/internal/tts/google"
+	"listen-with-me/backend/internal/tts/polly"
 	"listen-with-me/backend/internal/gemini"
 )
 
@@ -90,6 +92,17 @@ func Setup() http.Handler {
 		}
 		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
 		userH := handler.NewUserHandler(userRepo)
+
+		// Optional Polly provider — only initialized if AWS creds are present.
+		var pollyProv *polly.Provider
+		if os.Getenv("AWS_ACCESS_KEY_ID") != "" || os.Getenv("AWS_PROFILE") != "" {
+			if p, err := polly.New(context.Background()); err != nil {
+				log.Printf("Polly init failed (audio will fall back to browser TTS only): %v", err)
+			} else {
+				pollyProv = p
+			}
+		}
+		phraseH := handler.NewPhraseHandler(db, audioStorage, pollyProv)
 
 		mux := http.NewServeMux()
 
@@ -171,6 +184,30 @@ func Setup() http.Handler {
 
 		// User preferences
 		mux.Handle("PUT /api/user/language", middleware.Auth(http.HandlerFunc(userH.UpdateLanguage)))
+
+		// Phrase playlists
+		mux.Handle("POST /api/phrase-playlists/seed-dummy", middleware.Auth(http.HandlerFunc(phraseH.SeedDummy)))
+		mux.Handle("POST /api/phrase-playlists/import", middleware.Auth(http.HandlerFunc(phraseH.Import)))
+		mux.Handle("GET /api/phrase-playlists", middleware.Auth(http.HandlerFunc(phraseH.ListPlaylists)))
+		mux.Handle("GET /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.GetPlaylist)))
+		mux.Handle("PATCH /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.SetPlaylistFavorite)))
+		mux.Handle("GET /api/phrase-playlists/{id}/shares", middleware.Auth(http.HandlerFunc(phraseH.ListShares)))
+		mux.Handle("GET /api/phrase-playlists/{id}/share-candidates", middleware.Auth(http.HandlerFunc(phraseH.ShareCandidates)))
+		mux.Handle("POST /api/phrase-playlists/{id}/shares", middleware.Auth(http.HandlerFunc(phraseH.AddShare)))
+		mux.Handle("PATCH /api/phrase-playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(phraseH.UpdateShare)))
+		mux.Handle("DELETE /api/phrase-playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(phraseH.RemoveShare)))
+		mux.Handle("POST /api/phrases/{id}/review", middleware.Auth(http.HandlerFunc(phraseH.LogReview)))
+		mux.Handle("POST /api/phrases/{id}/rate", middleware.Auth(http.HandlerFunc(phraseH.RatePhrase)))
+		mux.Handle("PUT /api/phrases/{id}", middleware.Auth(http.HandlerFunc(phraseH.UpdatePhrase)))
+		mux.Handle("DELETE /api/phrases/{id}", middleware.Auth(http.HandlerFunc(phraseH.DeletePhrase)))
+		mux.Handle("PUT /api/phrase-groups/{id}", middleware.Auth(http.HandlerFunc(phraseH.UpdateGroup)))
+		mux.Handle("DELETE /api/phrase-groups/{id}", middleware.Auth(http.HandlerFunc(phraseH.DeleteGroup)))
+		mux.Handle("POST /api/phrases/{id}/audio/polly", middleware.Auth(http.HandlerFunc(phraseH.GeneratePollyAudio)))
+		mux.Handle("GET /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.GetPhraseVocabularyInfo)))
+		mux.Handle("POST /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.AddPhraseVocabulary)))
+		mux.Handle("GET /api/phrase-stats/leaderboard", middleware.Auth(http.HandlerFunc(phraseH.Leaderboard)))
+		mux.Handle("GET /api/phrase-stats/me", middleware.Auth(http.HandlerFunc(phraseH.MyStats)))
+		mux.Handle("GET /api/phrase-stats/me/detailed", middleware.Auth(http.HandlerFunc(phraseH.MyStatsDetailed)))
 
 		// TTS configuration (admin)
 		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))
