@@ -186,7 +186,6 @@ func Setup() http.Handler {
 		mux.Handle("PUT /api/user/language", middleware.Auth(http.HandlerFunc(userH.UpdateLanguage)))
 
 		// Phrase playlists
-		mux.Handle("POST /api/phrase-playlists/seed-dummy", middleware.Auth(http.HandlerFunc(phraseH.SeedDummy)))
 		mux.Handle("POST /api/phrase-playlists/import", middleware.Auth(http.HandlerFunc(phraseH.Import)))
 		mux.Handle("GET /api/phrase-playlists", middleware.Auth(http.HandlerFunc(phraseH.ListPlaylists)))
 		mux.Handle("GET /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.GetPlaylist)))
