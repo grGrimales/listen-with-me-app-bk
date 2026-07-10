@@ -29,14 +29,15 @@ type Story struct {
 }
 
 type Paragraph struct {
-	ID           int                    `json:"id"`
-	StoryID      int                    `json:"story_id"`
-	Position     int                    `json:"position"`
-	Content      string                 `json:"content"`
-	Images       []ParagraphImage       `json:"images"`
-	AudioURL     string                 `json:"audio_url"`
-	Translations []ParagraphTranslation `json:"translations,omitempty"`
-	Vocabulary   []Vocabulary           `json:"vocabulary,omitempty"`
+	ID             int                    `json:"id"`
+	StoryID        int                    `json:"story_id"`
+	Position       int                    `json:"position"`
+	Content        string                 `json:"content"`
+	Images         []ParagraphImage       `json:"images"`
+	AudioURL       string                 `json:"audio_url"`
+	Translations   []ParagraphTranslation `json:"translations,omitempty"`
+	Vocabulary     []Vocabulary           `json:"vocabulary,omitempty"`
+	WordTimestamps []WordTimestamp        `json:"word_timestamps,omitempty"`
 }
 
 type ParagraphImage struct {
@@ -67,12 +68,21 @@ type VoiceTimestamp struct {
 	EndMs       int `json:"end_ms"`
 }
 
+type WordTimestamp struct {
+	ParagraphID int    `json:"paragraph_id"`
+	WordIndex   int    `json:"word_index"`
+	Word        string `json:"word"`
+	StartMs     int    `json:"start_ms"`
+	EndMs       int    `json:"end_ms"`
+}
+
 type StoryVoice struct {
-	ID         int              `json:"id"`
-	StoryID    int              `json:"story_id"`
-	Name       string           `json:"name"`
-	AudioURL   string           `json:"audio_url"`
-	Timestamps []VoiceTimestamp `json:"timestamps"`
+	ID             int              `json:"id"`
+	StoryID        int              `json:"story_id"`
+	Name           string           `json:"name"`
+	AudioURL       string           `json:"audio_url"`
+	Timestamps     []VoiceTimestamp `json:"timestamps"`
+	WordTimestamps []WordTimestamp  `json:"word_timestamps"`
 }
 
 type UserProgress struct {
@@ -164,7 +174,8 @@ type UserVocabulary struct {
 }
 
 type AddUserVocabularyRequest struct {
-	Phrase string `json:"phrase"`
+	Phrase   string `json:"phrase"`
+	Language string `json:"language"` // target language of the story (en/pt); defaults to en
 }
 
 type UserStats struct {
@@ -197,6 +208,22 @@ type Playlist struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	StoryCount  int       `json:"story_count"`
+	Role        string    `json:"role"`                 // owner | editor | read
+	OwnerName   string    `json:"owner_name,omitempty"` // set for shared playlists
+}
+
+type PlaylistShare struct {
+	UserID     string    `json:"user_id"`
+	FullName   string    `json:"full_name"`
+	Email      string    `json:"email"`
+	Permission string    `json:"permission"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ShareCandidate struct {
+	UserID   string `json:"user_id"`
+	FullName string `json:"full_name"`
+	Email    string `json:"email"`
 }
 
 type CreatePlaylistRequest struct {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,13 +19,16 @@ import (
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
 	"listen-with-me/backend/internal/tts"
+	"listen-with-me/backend/internal/tts/elevenlabs"
 )
 
 type StoryHandler struct {
-	stories  *repository.StoryRepo
-	storage  storage.FileStorage
-	gemini   *gemini.GeminiClient
-	vocabTTS tts.Provider
+	stories    *repository.StoryRepo
+	storage    storage.FileStorage
+	gemini     *gemini.GeminiClient
+	vocabTTS   tts.Provider
+	elevenlabs *elevenlabs.Provider
+	ttsRepo    *repository.TTSRepo
 }
 
 func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage, gemini *gemini.GeminiClient) *StoryHandler {
@@ -33,6 +37,16 @@ func NewStoryHandler(stories *repository.StoryRepo, storage storage.FileStorage,
 
 func (h *StoryHandler) WithVocabTTS(p tts.Provider) *StoryHandler {
 	h.vocabTTS = p
+	return h
+}
+
+func (h *StoryHandler) WithElevenLabs(p *elevenlabs.Provider) *StoryHandler {
+	h.elevenlabs = p
+	return h
+}
+
+func (h *StoryHandler) WithTTSRepo(r *repository.TTSRepo) *StoryHandler {
+	h.ttsRepo = r
 	return h
 }
 
@@ -585,6 +599,159 @@ func (h *StoryHandler) UploadVoiceAudio(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(v)
 }
 
+type generateElevenLabsVoiceRequest struct {
+	Name    string `json:"name"`     // optional; defaults to the tts_voices name
+	VoiceID string `json:"voice_id"` // UUID from tts_voices (resolved to the raw provider id)
+	ModelID string `json:"model_id"`
+}
+
+// paragraphSeparator joins paragraphs when sending to ElevenLabs. Two newlines create
+// a clear pause and give us predictable characters to skip when mapping alignment back.
+const paragraphSeparator = "\n\n"
+
+// POST /api/stories/{id}/voices/generate-elevenlabs  [admin]
+// Generates a full-story voice via ElevenLabs `with-timestamps`, saving audio + paragraph
+// and per-word timestamps in a single call. Only used for new voices; existing voices
+// (uploaded manually) remain untouched.
+func (h *StoryHandler) GenerateElevenLabsVoice(w http.ResponseWriter, r *http.Request) {
+	if h.elevenlabs == nil {
+		jsonError(w, "ElevenLabs is not configured on the server", http.StatusServiceUnavailable)
+		return
+	}
+	storyID, err := pathID(r, "/api/stories/")
+	if err != nil {
+		jsonError(w, "invalid story id", http.StatusBadRequest)
+		return
+	}
+
+	var req generateElevenLabsVoiceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.VoiceID == "" || req.ModelID == "" {
+		jsonError(w, "voice_id and model_id are required", http.StatusBadRequest)
+		return
+	}
+	if h.ttsRepo == nil {
+		jsonError(w, "TTS voices are not configured on the server", http.StatusServiceUnavailable)
+		return
+	}
+
+	voice, err := h.ttsRepo.GetVoiceByID(req.VoiceID)
+	if err != nil {
+		log.Printf("generate voice get tts voice error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if voice == nil || !voice.Enabled {
+		jsonError(w, "voice not found", http.StatusNotFound)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = voice.Name
+	}
+
+	story, err := h.stories.GetByID(storyID)
+	if err != nil {
+		log.Printf("generate voice get story error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if story == nil {
+		jsonError(w, "story not found", http.StatusNotFound)
+		return
+	}
+	if len(story.Paragraphs) == 0 {
+		jsonError(w, "story has no paragraphs to narrate", http.StatusBadRequest)
+		return
+	}
+
+	// Build the input text and remember where each paragraph starts (in rune count),
+	// since the ElevenLabs alignment array is 1 entry per character.
+	var texts []string
+	for _, p := range story.Paragraphs {
+		texts = append(texts, p.Content)
+	}
+	fullText := strings.Join(texts, paragraphSeparator)
+
+	result, err := h.elevenlabs.GenerateAudioWithTimestamps(r.Context(), fullText, voice.VoiceID, req.ModelID)
+	if err != nil {
+		log.Printf("elevenlabs with-timestamps error: %v", err)
+		jsonError(w, "audio generation failed", http.StatusBadGateway)
+		return
+	}
+
+	paraTS, wordTS := mapAlignmentToParagraphs(story.Paragraphs, result.Words, texts)
+
+	filename := fmt.Sprintf("audio/voice_%d_%d.mp3", storyID, time.Now().UnixNano())
+	audioURL, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(result.Data), result.ContentType)
+	if err != nil {
+		log.Printf("upload voice audio error: %v", err)
+		jsonError(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	savedVoice, err := h.stories.SaveVoiceWithTimestamps(storyID, name, audioURL, paraTS, wordTS)
+	if err != nil {
+		log.Printf("save voice error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(savedVoice)
+}
+
+// mapAlignmentToParagraphs walks the flat list of word-level timings ElevenLabs returned
+// and buckets them per paragraph based on the words in each paragraph's source text.
+// Also produces paragraph-level start/end timestamps (min/max of its words).
+func mapAlignmentToParagraphs(paras []model.Paragraph, words []elevenlabs.AlignedWord, paraTexts []string) ([]model.VoiceTimestamp, []model.WordTimestamp) {
+	var paraTS []model.VoiceTimestamp
+	var wordTS []model.WordTimestamp
+	if len(words) == 0 {
+		return paraTS, wordTS
+	}
+
+	cursor := 0 // index into words
+	for i, p := range paras {
+		expectedWords := strings.Fields(paraTexts[i]) // count of words expected in this paragraph
+		if len(expectedWords) == 0 {
+			continue
+		}
+
+		take := len(expectedWords)
+		if cursor+take > len(words) {
+			take = len(words) - cursor
+		}
+		if take <= 0 {
+			break
+		}
+
+		startMs := words[cursor].StartMs
+		endMs := words[cursor+take-1].EndMs
+		paraTS = append(paraTS, model.VoiceTimestamp{
+			ParagraphID: p.ID,
+			StartMs:     startMs,
+			EndMs:       endMs,
+		})
+
+		for j := 0; j < take; j++ {
+			wordTS = append(wordTS, model.WordTimestamp{
+				ParagraphID: p.ID,
+				WordIndex:   j,
+				Word:        words[cursor+j].Word,
+				StartMs:     words[cursor+j].StartMs,
+				EndMs:       words[cursor+j].EndMs,
+			})
+		}
+		cursor += take
+	}
+	return paraTS, wordTS
+}
+
 // helpers
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -836,6 +1003,213 @@ func (h *StoryHandler) RemoveStoryFromPlaylist(w http.ResponseWriter, r *http.Re
 	jsonOK(w, map[string]string{"status": "removed"})
 }
 
+// --- Story playlist sharing ---
+
+// requirePlaylistOwner writes an error response and returns false if the current
+// user is not the owner of the playlist.
+func (h *StoryHandler) requirePlaylistOwner(w http.ResponseWriter, playlistID int, userID string) bool {
+	ownerID, err := h.stories.PlaylistOwner(playlistID)
+	if err == sql.ErrNoRows {
+		jsonError(w, "not found", http.StatusNotFound)
+		return false
+	}
+	if err != nil {
+		log.Printf("requirePlaylistOwner: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	if ownerID != userID {
+		jsonError(w, "only the owner can perform this action", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// GET /api/playlists/{id}/share-candidates?q=...
+func (h *StoryHandler) PlaylistShareCandidates(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePlaylistOwner(w, id, userID) {
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		jsonOK(w, []model.ShareCandidate{})
+		return
+	}
+	items, err := h.stories.SearchPlaylistShareCandidates(id, userID, "%"+strings.ToLower(q)+"%")
+	if err != nil {
+		log.Printf("PlaylistShareCandidates: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, items)
+}
+
+// GET /api/playlists/{id}/shares
+func (h *StoryHandler) ListPlaylistShares(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePlaylistOwner(w, id, userID) {
+		return
+	}
+	items, err := h.stories.ListPlaylistShares(id)
+	if err != nil {
+		log.Printf("ListPlaylistShares: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, items)
+}
+
+// POST /api/playlists/{id}/shares  body: {email, permission}
+func (h *StoryHandler) AddPlaylistShare(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePlaylistOwner(w, id, userID) {
+		return
+	}
+	var body struct {
+		Email      string `json:"email"`
+		Permission string `json:"permission"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
+	if body.Email == "" {
+		jsonError(w, "email is required", http.StatusBadRequest)
+		return
+	}
+	if body.Permission != "read" && body.Permission != "editor" {
+		jsonError(w, "permission must be 'read' or 'editor'", http.StatusBadRequest)
+		return
+	}
+	targetID, err := h.stories.UserIDByEmail(body.Email)
+	if err == sql.ErrNoRows {
+		jsonError(w, "no user with that email", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("AddPlaylistShare user lookup: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if targetID == userID {
+		jsonError(w, "you already own this playlist", http.StatusBadRequest)
+		return
+	}
+	if err := h.stories.AddPlaylistShare(id, targetID, body.Permission); err != nil {
+		log.Printf("AddPlaylistShare upsert: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	share, err := h.stories.GetPlaylistShare(id, targetID)
+	if err != nil {
+		log.Printf("AddPlaylistShare read-back: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, share)
+}
+
+// PATCH /api/playlists/{id}/shares/{userID}  body: {permission}
+func (h *StoryHandler) UpdatePlaylistShare(w http.ResponseWriter, r *http.Request) {
+	ownerID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	targetID := r.PathValue("userID")
+	if targetID == "" {
+		jsonError(w, "user id required", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePlaylistOwner(w, id, ownerID) {
+		return
+	}
+	var body struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Permission != "read" && body.Permission != "editor" {
+		jsonError(w, "permission must be 'read' or 'editor'", http.StatusBadRequest)
+		return
+	}
+	n, err := h.stories.UpdatePlaylistShare(id, targetID, body.Permission)
+	if err != nil {
+		log.Printf("UpdatePlaylistShare: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if n == 0 {
+		jsonError(w, "share not found", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]any{"permission": body.Permission})
+}
+
+// DELETE /api/playlists/{id}/shares/{userID}
+func (h *StoryHandler) RemovePlaylistShare(w http.ResponseWriter, r *http.Request) {
+	ownerID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	targetID := r.PathValue("userID")
+	if targetID == "" {
+		jsonError(w, "user id required", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePlaylistOwner(w, id, ownerID) {
+		return
+	}
+	if err := h.stories.RemovePlaylistShare(id, targetID); err != nil {
+		log.Printf("RemovePlaylistShare: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true})
+}
+
 // --- User Vocabulary ---
 
 // POST /api/stories/{id}/vocabulary
@@ -859,6 +1233,12 @@ func (h *StoryHandler) AddUserVocabulary(w http.ResponseWriter, r *http.Request)
 		jsonError(w, "phrase is required", http.StatusBadRequest)
 		return
 	}
+	lang := req.Language
+	if lang == "" {
+		lang = "en"
+	}
+
+	// Always save the reader vocabulary (highlight / click-to-play).
 	v := &model.UserVocabulary{
 		UserID:  userID,
 		StoryID: storyID,
@@ -869,9 +1249,39 @@ func (h *StoryHandler) AddUserVocabulary(w http.ResponseWriter, r *http.Request)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Add the word to the word playlist of every story playlist that contains this
+	// story. Its audio is the story's own segment (nil when the paragraph has no audio yet).
+	seg, err := h.stories.FindStorySegment(storyID, req.Phrase)
+	if err != nil {
+		log.Printf("AddUserVocabulary segment lookup error: %v", err)
+	}
+	playlists, err := h.stories.PlaylistsContainingStory(userID, storyID)
+	if err != nil {
+		log.Printf("AddUserVocabulary playlists lookup error: %v", err)
+	}
+	addedTo := 0
+	for _, pl := range playlists {
+		if err := h.stories.UpsertStoryPlaylistPhrase(userID, pl.ID, pl.Name, lang, req.Phrase, storyID, seg); err != nil {
+			log.Printf("AddUserVocabulary upsert story phrase (playlist %d): %v", pl.ID, err)
+			continue
+		}
+		addedTo++
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(v)
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":                 v.ID,
+		"phrase":             v.Phrase,
+		"story_id":           v.StoryID,
+		"position":           v.Position,
+		"audio_url":          v.AudioURL,
+		"created_at":         v.CreatedAt,
+		"in_story_playlists": len(playlists),
+		"added_to_playlists": addedTo,
+		"audio_missing":      seg == nil,
+	})
 }
 
 // GET /api/stories/{id}/vocabulary

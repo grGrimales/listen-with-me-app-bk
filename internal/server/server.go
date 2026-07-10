@@ -80,7 +80,7 @@ func Setup() http.Handler {
 		ttsRepo := repository.NewTTSRepo(db)
 
 		elevenlabsAPIKey := os.Getenv("ELEVENLABS_API_KEY")
-		ttsProvider := elevenlabs.New(elevenlabsAPIKey)
+		elevenLabsProv := elevenlabs.New(elevenlabsAPIKey)
 
 		geminiAPIKey := os.Getenv("GEMINI_API_KEY")
 		geminiClient := gemini.NewClient(geminiAPIKey)
@@ -90,7 +90,14 @@ func Setup() http.Handler {
 		if googleKey := os.Getenv("GOOGLE_TTS_API_KEY"); googleKey != "" {
 			storyH = storyH.WithVocabTTS(google.New(googleKey))
 		}
-		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, ttsProvider)
+		if elevenlabsAPIKey != "" {
+			storyH = storyH.WithElevenLabs(elevenLabsProv)
+		}
+		storyH = storyH.WithTTSRepo(ttsRepo)
+		ttsH := handler.NewTTSHandler(ttsRepo, storyRepo, audioStorage, elevenLabsProv)
+		if elevenlabsAPIKey != "" {
+			ttsH = ttsH.WithElevenLabs(elevenLabsProv)
+		}
 		userH := handler.NewUserHandler(userRepo)
 
 		// Optional Polly provider — only initialized if AWS creds are present.
@@ -154,6 +161,7 @@ func Setup() http.Handler {
 		// Voices
 		mux.Handle("POST /api/stories/{id}/voices", admin(storyH.AddVoice))
 		mux.Handle("POST /api/stories/{id}/voices/upload", admin(storyH.UploadVoiceAudio))
+		mux.Handle("POST /api/stories/{id}/voices/generate-elevenlabs", admin(storyH.GenerateElevenLabsVoice))
 		
 		// Paragraphs
 		mux.Handle("POST /api/stories/{id}/paragraphs", admin(storyH.AddParagraph))
@@ -175,6 +183,13 @@ func Setup() http.Handler {
 		mux.Handle("POST /api/playlists/{id}/stories", middleware.Auth(http.HandlerFunc(storyH.AddStoryToPlaylist)))
 		mux.Handle("DELETE /api/playlists/{id}/stories/{storyID}", middleware.Auth(http.HandlerFunc(storyH.RemoveStoryFromPlaylist)))
 
+		// Story playlist sharing
+		mux.Handle("GET /api/playlists/{id}/shares", middleware.Auth(http.HandlerFunc(storyH.ListPlaylistShares)))
+		mux.Handle("GET /api/playlists/{id}/share-candidates", middleware.Auth(http.HandlerFunc(storyH.PlaylistShareCandidates)))
+		mux.Handle("POST /api/playlists/{id}/shares", middleware.Auth(http.HandlerFunc(storyH.AddPlaylistShare)))
+		mux.Handle("PATCH /api/playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(storyH.UpdatePlaylistShare)))
+		mux.Handle("DELETE /api/playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(storyH.RemovePlaylistShare)))
+
 		mux.Handle("POST /api/sentences/{id}/evaluate", middleware.Auth(http.HandlerFunc(storyH.EvaluateSentence)))
 		mux.Handle("GET /api/sentences/{id}/history", middleware.Auth(http.HandlerFunc(storyH.GetSentenceHistory)))
 
@@ -188,6 +203,7 @@ func Setup() http.Handler {
 		// Phrase playlists
 		mux.Handle("POST /api/phrase-playlists/import", middleware.Auth(http.HandlerFunc(phraseH.Import)))
 		mux.Handle("GET /api/phrase-playlists", middleware.Auth(http.HandlerFunc(phraseH.ListPlaylists)))
+		mux.Handle("GET /api/story-phrase-playlists", middleware.Auth(http.HandlerFunc(phraseH.ListStoryPhrasePlaylists)))
 		mux.Handle("GET /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.GetPlaylist)))
 		mux.Handle("PATCH /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.SetPlaylistFavorite)))
 		mux.Handle("GET /api/phrase-playlists/{id}/shares", middleware.Auth(http.HandlerFunc(phraseH.ListShares)))

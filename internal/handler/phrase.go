@@ -596,6 +596,9 @@ type phraseItem struct {
 	ReviewCount     int        `json:"review_count"`
 	PollyAudioURLF  string     `json:"polly_audio_url_female"`
 	PollyAudioURLM  string     `json:"polly_audio_url_male"`
+	SourceAudioURL  string     `json:"source_audio_url"`
+	SourceStartMs   *int       `json:"source_start_ms"`
+	SourceEndMs     *int       `json:"source_end_ms"`
 	SRS             *phraseSRS `json:"srs"`
 }
 
@@ -624,6 +627,7 @@ type phrasePlaylistDetail struct {
 	Role               string              `json:"role"`
 	ParentPlaylistID   *int                `json:"parent_playlist_id"`
 	ParentPlaylistName string              `json:"parent_playlist_name"`
+	StoryPlaylistID    *int                `json:"story_playlist_id"`
 	Groups             []phraseGroupDetail `json:"groups"`
 }
 
@@ -653,7 +657,7 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 		q += ` AND p.language = $2`
 		args = append(args, lang)
 	}
-	q += ` AND p.parent_playlist_id IS NULL GROUP BY p.id, s.permission ORDER BY is_favorite DESC, p.created_at DESC`
+	q += ` AND p.parent_playlist_id IS NULL AND p.story_playlist_id IS NULL GROUP BY p.id, s.permission ORDER BY is_favorite DESC, p.created_at DESC`
 
 	rows, err := h.db.Query(q, args...)
 	if err != nil {
@@ -668,6 +672,57 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 		var s phrasePlaylistSummary
 		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &s.Language, &s.IsFavorite, &s.Role, &s.CreatedAt, &s.GroupCount, &s.PhraseCount); err != nil {
 			log.Printf("ListPlaylists scan: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		items = append(items, s)
+	}
+	jsonOK(w, items)
+}
+
+type storyPhrasePlaylistSummary struct {
+	ID                int    `json:"id"`
+	Name              string `json:"name"`
+	Language          string `json:"language"`
+	StoryPlaylistID   int    `json:"story_playlist_id"`
+	StoryPlaylistName string `json:"story_playlist_name"`
+	PhraseCount       int    `json:"phrase_count"`
+	CreatedAt         string `json:"created_at"`
+}
+
+// GET /api/story-phrase-playlists
+// Lists the current user's word playlists (one per story playlist), kept separate
+// from the normal phrase playlists.
+func (h *PhraseHandler) ListStoryPhrasePlaylists(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	rows, err := h.db.Query(
+		`SELECT p.id, p.name, p.language, p.story_playlist_id, sp.name, COUNT(ph.id) AS phrase_count, p.created_at
+		 FROM phrase_playlists p
+		 JOIN playlists sp ON sp.id = p.story_playlist_id
+		 LEFT JOIN phrase_groups g ON g.phrase_playlist_id = p.id
+		 LEFT JOIN phrases ph ON ph.phrase_group_id = g.id
+		 WHERE p.user_id = $1 AND p.story_playlist_id IS NOT NULL
+		 GROUP BY p.id, sp.name
+		 ORDER BY p.created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		log.Printf("ListStoryPhrasePlaylists query: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	items := []storyPhrasePlaylistSummary{}
+	for rows.Next() {
+		var s storyPhrasePlaylistSummary
+		if err := rows.Scan(&s.ID, &s.Name, &s.Language, &s.StoryPlaylistID, &s.StoryPlaylistName, &s.PhraseCount, &s.CreatedAt); err != nil {
+			log.Printf("ListStoryPhrasePlaylists scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -693,17 +748,18 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 	var pl phrasePlaylistDetail
 	var parentID sql.NullInt64
 	var parentName sql.NullString
+	var storyPlaylistID sql.NullInt64
 	err = h.db.QueryRow(
 		`SELECT p.id, p.name, COALESCE(p.description, ''), p.language,
 		        CASE WHEN p.user_id = $2 THEN p.is_favorite ELSE FALSE END,
 		        CASE WHEN p.user_id = $2 THEN 'owner' ELSE COALESCE(s.permission, '') END AS role,
-		        p.parent_playlist_id, parent.name
+		        p.parent_playlist_id, parent.name, p.story_playlist_id
 		 FROM phrase_playlists p
 		 LEFT JOIN phrase_playlist_shares s ON s.playlist_id = p.id AND s.user_id = $2
 		 LEFT JOIN phrase_playlists parent ON parent.id = p.parent_playlist_id
 		 WHERE p.id = $1 AND (p.user_id = $2 OR s.user_id = $2)`,
 		id, userID,
-	).Scan(&pl.ID, &pl.Name, &pl.Description, &pl.Language, &pl.IsFavorite, &pl.Role, &parentID, &parentName)
+	).Scan(&pl.ID, &pl.Name, &pl.Description, &pl.Language, &pl.IsFavorite, &pl.Role, &parentID, &parentName, &storyPlaylistID)
 	if err == sql.ErrNoRows {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
@@ -718,12 +774,17 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		pl.ParentPlaylistID = &v
 		pl.ParentPlaylistName = parentName.String
 	}
+	if storyPlaylistID.Valid {
+		v := int(storyPlaylistID.Int64)
+		pl.StoryPlaylistID = &v
+	}
 
 	rows, err := h.db.Query(
 		`SELECT g.id, g.name, g.position,
 		        ph.id, ph.text, ph.translation_es, COALESCE(ph.pronunciation_es, ''), ph.position, ph.created_at,
 		        COALESCE(ph.polly_audio_url_female, ''),
 		        COALESCE(ph.polly_audio_url_male, ''),
+		        COALESCE(ph.source_audio_url, ''), ph.source_start_ms, ph.source_end_ms,
 		        COALESCE(rc.review_count, 0) AS review_count,
 		        srs.ease_factor, srs.interval_days, srs.repetitions, srs.lapses,
 		        srs.last_reviewed_at, srs.next_review_at
@@ -755,13 +816,15 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		var phText, phTr, phPron sql.NullString
 		var phPos sql.NullInt64
 		var phCreated sql.NullTime
-		var phPollyURLF, phPollyURLM string
+		var phPollyURLF, phPollyURLM, phSourceURL string
+		var phSourceStart, phSourceEnd sql.NullInt64
 		var reviewCount int
 		var srsEF, srsInterval sql.NullFloat64
 		var srsReps, srsLapses sql.NullInt64
 		var srsLast, srsNext sql.NullTime
 		if err := rows.Scan(&gID, &gName, &gPos, &phID, &phText, &phTr, &phPron, &phPos, &phCreated,
 			&phPollyURLF, &phPollyURLM,
+			&phSourceURL, &phSourceStart, &phSourceEnd,
 			&reviewCount, &srsEF, &srsInterval, &srsReps, &srsLapses, &srsLast, &srsNext); err != nil {
 			log.Printf("GetPlaylist scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -783,6 +846,15 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 				ReviewCount:     reviewCount,
 				PollyAudioURLF:  phPollyURLF,
 				PollyAudioURLM:  phPollyURLM,
+				SourceAudioURL:  phSourceURL,
+			}
+			if phSourceStart.Valid {
+				v := int(phSourceStart.Int64)
+				p.SourceStartMs = &v
+			}
+			if phSourceEnd.Valid {
+				v := int(phSourceEnd.Int64)
+				p.SourceEndMs = &v
 			}
 			if phCreated.Valid {
 				p.CreatedAt = phCreated.Time.Format("2006-01-02T15:04:05Z07:00")

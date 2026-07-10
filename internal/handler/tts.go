@@ -12,13 +12,15 @@ import (
 	"listen-with-me/backend/internal/repository"
 	"listen-with-me/backend/internal/storage"
 	"listen-with-me/backend/internal/tts"
+	"listen-with-me/backend/internal/tts/elevenlabs"
 )
 
 type TTSHandler struct {
-	ttsRepo  *repository.TTSRepo
-	stories  *repository.StoryRepo
-	storage  storage.FileStorage
-	provider tts.Provider
+	ttsRepo    *repository.TTSRepo
+	stories    *repository.StoryRepo
+	storage    storage.FileStorage
+	provider   tts.Provider
+	elevenlabs *elevenlabs.Provider
 }
 
 func NewTTSHandler(ttsRepo *repository.TTSRepo, stories *repository.StoryRepo, store storage.FileStorage, provider tts.Provider) *TTSHandler {
@@ -28,6 +30,12 @@ func NewTTSHandler(ttsRepo *repository.TTSRepo, stories *repository.StoryRepo, s
 		storage:  store,
 		provider: provider,
 	}
+}
+
+// WithElevenLabs enables word-level timestamps on paragraph audio generation.
+func (h *TTSHandler) WithElevenLabs(p *elevenlabs.Provider) *TTSHandler {
+	h.elevenlabs = p
+	return h
 }
 
 // GET /api/tts/voices [admin]
@@ -121,15 +129,43 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 		textToGenerate = trans.Content
 	}
 
-	result, err := h.provider.GenerateAudio(r.Context(), textToGenerate, voice.VoiceID, req.ModelID)
-	if err != nil {
-		log.Printf("tts generate audio error: %v", err)
-		jsonError(w, "audio generation failed", http.StatusBadGateway)
-		return
+	// For the main (English) paragraph audio we request word-level timestamps so the
+	// reader's click-to-play works. Translations keep the plain generation.
+	var audioData []byte
+	var contentType string
+	var words []model.WordTimestamp
+
+	if req.Language == "en" && h.elevenlabs != nil {
+		res, err := h.elevenlabs.GenerateAudioWithTimestamps(r.Context(), textToGenerate, voice.VoiceID, req.ModelID)
+		if err != nil {
+			log.Printf("tts generate audio (with-timestamps) error: %v", err)
+			jsonError(w, "audio generation failed", http.StatusBadGateway)
+			return
+		}
+		audioData = res.Data
+		contentType = res.ContentType
+		for i, aw := range res.Words {
+			words = append(words, model.WordTimestamp{
+				ParagraphID: paragraphID,
+				WordIndex:   i,
+				Word:        aw.Word,
+				StartMs:     aw.StartMs,
+				EndMs:       aw.EndMs,
+			})
+		}
+	} else {
+		res, err := h.provider.GenerateAudio(r.Context(), textToGenerate, voice.VoiceID, req.ModelID)
+		if err != nil {
+			log.Printf("tts generate audio error: %v", err)
+			jsonError(w, "audio generation failed", http.StatusBadGateway)
+			return
+		}
+		audioData = res.Data
+		contentType = res.ContentType
 	}
 
 	filename := fmt.Sprintf("audio/tts_%d_%s_%d.mp3", paragraphID, req.Language, time.Now().UnixNano())
-	audioURL, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(result.Data), result.ContentType)
+	audioURL, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(audioData), contentType)
 	if err != nil {
 		log.Printf("tts upload audio error: %v", err)
 		jsonError(w, "upload failed", http.StatusInternalServerError)
@@ -146,6 +182,10 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		// Replace the paragraph's word timestamps (empty slice clears stale ones).
+		if err := h.stories.SaveParagraphWordTimestamps(paragraphID, words); err != nil {
+			log.Printf("tts save word timestamps error: %v", err)
+		}
 	} else {
 		if err := h.stories.SetTranslationAudio(paragraphID, req.Language, audioURL); err != nil {
 			log.Printf("tts set translation audio error: %v", err)
@@ -154,7 +194,7 @@ func (h *TTSHandler) GenerateParagraphAudio(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	jsonOK(w, map[string]string{"audio_url": audioURL})
+	jsonOK(w, map[string]any{"audio_url": audioURL, "word_count": len(words)})
 }
 
 // GET /api/paragraphs/{id}/audio/history [admin]

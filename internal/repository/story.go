@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode"
 
 	"listen-with-me/backend/internal/model"
 )
@@ -515,9 +516,71 @@ func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 			return nil, err
 		}
 		p.Vocabulary = vocab
+
+		words, err := r.listParagraphWordTimestamps(p.ID)
+		if err != nil {
+			return nil, err
+		}
+		p.WordTimestamps = words
+
 		paragraphs = append(paragraphs, p)
 	}
 	return paragraphs, nil
+}
+
+func (r *StoryRepo) listParagraphWordTimestamps(paragraphID int) ([]model.WordTimestamp, error) {
+	rows, err := r.db.Query(
+		`SELECT word_index, word, start_ms, end_ms
+		 FROM paragraph_word_timestamps
+		 WHERE paragraph_id = $1
+		 ORDER BY word_index`, paragraphID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	words := []model.WordTimestamp{}
+	for rows.Next() {
+		w := model.WordTimestamp{ParagraphID: paragraphID}
+		if err := rows.Scan(&w.WordIndex, &w.Word, &w.StartMs, &w.EndMs); err != nil {
+			return nil, err
+		}
+		words = append(words, w)
+	}
+	return words, nil
+}
+
+// SaveParagraphWordTimestamps replaces the word timestamps for a paragraph
+// (called after regenerating that paragraph's audio).
+func (r *StoryRepo) SaveParagraphWordTimestamps(paragraphID int, words []model.WordTimestamp) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM paragraph_word_timestamps WHERE paragraph_id = $1`, paragraphID); err != nil {
+		return err
+	}
+
+	if len(words) > 0 {
+		stmt, err := tx.Prepare(
+			`INSERT INTO paragraph_word_timestamps (paragraph_id, word_index, word, start_ms, end_ms)
+			 VALUES ($1, $2, $3, $4, $5)`,
+		)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, wt := range words {
+			if _, err := stmt.Exec(paragraphID, wt.WordIndex, wt.Word, wt.StartMs, wt.EndMs); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (r *StoryRepo) listImages(paragraphID int) ([]model.ParagraphImage, error) {
@@ -638,6 +701,208 @@ func (r *StoryRepo) listVocabulary(paragraphID int) ([]model.Vocabulary, error) 
 	return list, nil
 }
 
+// --- Story-linked phrase playlists ---
+
+// normalizeWord lowercases and strips everything except letters, digits and apostrophes,
+// matching the frontend's phrase-matching normalization.
+func normalizeWord(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '\'' {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
+}
+
+// AudioSegment is a [start, end] ms window of a story's audio file.
+type AudioSegment struct {
+	AudioURL string
+	StartMs  int
+	EndMs    int
+}
+
+// StoryPlaylistRef identifies one of the user's story playlists.
+type StoryPlaylistRef struct {
+	ID   int
+	Name string
+}
+
+// FindStorySegment locates a contiguous phrase inside a story's audio using the
+// per-word timestamps, returning the matching paragraph's audio segment. Returns
+// nil (no error) when the phrase can't be matched to any paragraph that has audio.
+func (r *StoryRepo) FindStorySegment(storyID int, phrase string) (*AudioSegment, error) {
+	var tokens []string
+	for _, t := range strings.Fields(phrase) {
+		if n := normalizeWord(t); n != "" {
+			tokens = append(tokens, n)
+		}
+	}
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+
+	rows, err := r.db.Query(
+		`SELECT id, COALESCE(audio_url, '') FROM paragraphs WHERE story_id = $1 ORDER BY position`, storyID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type para struct {
+		id  int
+		url string
+	}
+	var paras []para
+	for rows.Next() {
+		var p para
+		if err := rows.Scan(&p.id, &p.url); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		paras = append(paras, p)
+	}
+	rows.Close()
+
+	for _, p := range paras {
+		if p.url == "" {
+			continue
+		}
+		words, err := r.listParagraphWordTimestamps(p.id)
+		if err != nil {
+			return nil, err
+		}
+		if len(words) == 0 {
+			continue
+		}
+		for i := 0; i+len(tokens) <= len(words); i++ {
+			match := true
+			for j := 0; j < len(tokens); j++ {
+				if normalizeWord(words[i+j].Word) != tokens[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return &AudioSegment{
+					AudioURL: p.url,
+					StartMs:  words[i].StartMs,
+					EndMs:    words[i+len(tokens)-1].EndMs,
+				}, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// PlaylistsContainingStory returns the user's story playlists that contain the story.
+func (r *StoryRepo) PlaylistsContainingStory(userID string, storyID int) ([]StoryPlaylistRef, error) {
+	rows, err := r.db.Query(
+		`SELECT p.id, p.name
+		 FROM playlists p
+		 JOIN playlist_stories ps ON ps.playlist_id = p.id
+		 WHERE p.user_id = $1 AND ps.story_id = $2
+		 ORDER BY p.name`, userID, storyID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StoryPlaylistRef
+	for rows.Next() {
+		var ref StoryPlaylistRef
+		if err := rows.Scan(&ref.ID, &ref.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+// UpsertStoryPlaylistPhrase adds (or refreshes) a saved word in the phrase playlist
+// tied to a story playlist, creating that playlist and its default group on first use.
+// seg may be nil (the word is stored without audio until its paragraph audio exists).
+func (r *StoryRepo) UpsertStoryPlaylistPhrase(userID string, storyPlaylistID int, storyPlaylistName, language, text string, sourceStoryID int, seg *AudioSegment) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Find or create the word playlist for this story playlist.
+	var playlistID int
+	err = tx.QueryRow(
+		`SELECT id FROM phrase_playlists WHERE user_id = $1 AND story_playlist_id = $2`, userID, storyPlaylistID,
+	).Scan(&playlistID)
+	if err == sql.ErrNoRows {
+		if err := tx.QueryRow(
+			`INSERT INTO phrase_playlists (user_id, name, description, language, story_playlist_id)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			userID, "📖 "+storyPlaylistName, "Words saved from stories in '"+storyPlaylistName+"'", language, storyPlaylistID,
+		).Scan(&playlistID); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	// Find or create the default "Words" group.
+	var groupID int
+	err = tx.QueryRow(
+		`SELECT id FROM phrase_groups WHERE phrase_playlist_id = $1 ORDER BY position, id LIMIT 1`, playlistID,
+	).Scan(&groupID)
+	if err == sql.ErrNoRows {
+		if err := tx.QueryRow(
+			`INSERT INTO phrase_groups (phrase_playlist_id, name, position) VALUES ($1, 'Words', 0) RETURNING id`,
+			playlistID,
+		).Scan(&groupID); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	var audioURL any
+	var startMs, endMs any
+	if seg != nil {
+		audioURL, startMs, endMs = seg.AudioURL, seg.StartMs, seg.EndMs
+	}
+
+	// Dedup by lower(text): update the segment if it already exists, else insert.
+	var existing int
+	err = tx.QueryRow(
+		`SELECT id FROM phrases WHERE phrase_group_id = $1 AND lower(text) = lower($2) LIMIT 1`,
+		groupID, text,
+	).Scan(&existing)
+	if err == sql.ErrNoRows {
+		var pos int
+		if err := tx.QueryRow(
+			`SELECT COALESCE(MAX(position), -1) + 1 FROM phrases WHERE phrase_group_id = $1`, groupID,
+		).Scan(&pos); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO phrases (phrase_group_id, text, translation_es, pronunciation_es, position,
+			                      source_story_id, source_audio_url, source_start_ms, source_end_ms)
+			 VALUES ($1, $2, '', '', $3, $4, $5, $6, $7)`,
+			groupID, text, pos, sourceStoryID, audioURL, startMs, endMs,
+		); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if seg != nil {
+		// Only refresh the segment when we have a new one (don't clobber existing audio with nulls).
+		if _, err := tx.Exec(
+			`UPDATE phrases SET source_story_id = $2, source_audio_url = $3, source_start_ms = $4, source_end_ms = $5 WHERE id = $1`,
+			existing, sourceStoryID, audioURL, startMs, endMs,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // --- Voices ---
 
 func (r *StoryRepo) AddVoice(v *model.StoryVoice) error {
@@ -672,7 +937,91 @@ func (r *StoryRepo) listVoices(storyID int) ([]model.StoryVoice, error) {
 		_ = json.Unmarshal(tsRaw, &v.Timestamps)
 		voices = append(voices, v)
 	}
+
+	for i := range voices {
+		words, err := r.listWordTimestamps(voices[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		voices[i].WordTimestamps = words
+	}
 	return voices, nil
+}
+
+func (r *StoryRepo) listWordTimestamps(voiceID int) ([]model.WordTimestamp, error) {
+	rows, err := r.db.Query(
+		`SELECT paragraph_id, word_index, word, start_ms, end_ms
+		 FROM story_voice_word_timestamps
+		 WHERE voice_id = $1
+		 ORDER BY paragraph_id, word_index`, voiceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	words := []model.WordTimestamp{}
+	for rows.Next() {
+		var w model.WordTimestamp
+		if err := rows.Scan(&w.ParagraphID, &w.WordIndex, &w.Word, &w.StartMs, &w.EndMs); err != nil {
+			return nil, err
+		}
+		words = append(words, w)
+	}
+	return words, nil
+}
+
+// SaveVoiceWithTimestamps inserts a story voice + its paragraph and word timestamps atomically.
+func (r *StoryRepo) SaveVoiceWithTimestamps(storyID int, name, audioURL string, para []model.VoiceTimestamp, words []model.WordTimestamp) (*model.StoryVoice, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	ts, err := json.Marshal(para)
+	if err != nil {
+		return nil, err
+	}
+
+	var vID int
+	if err := tx.QueryRow(
+		`INSERT INTO story_voices (story_id, name, audio_url, timestamps)
+		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		storyID, name, audioURL, ts,
+	).Scan(&vID); err != nil {
+		return nil, err
+	}
+
+	if len(words) > 0 {
+		stmt, err := tx.Prepare(
+			`INSERT INTO story_voice_word_timestamps
+			 (voice_id, paragraph_id, word_index, word, start_ms, end_ms)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer stmt.Close()
+		for _, w := range words {
+			if _, err := stmt.Exec(vID, w.ParagraphID, w.WordIndex, w.Word, w.StartMs, w.EndMs); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return &model.StoryVoice{
+		ID:             vID,
+		StoryID:        storyID,
+		Name:           name,
+		AudioURL:       audioURL,
+		Timestamps:     para,
+		WordTimestamps: words,
+	}, nil
 }
 
 // --- Reviews & Stats ---
@@ -851,12 +1200,19 @@ func (r *StoryRepo) UpdatePlaylist(p *model.Playlist) error {
 }
 
 func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
+	// Owned playlists + playlists shared with the user. Owned first, then favorites, newest.
 	rows, err := r.db.Query(`
-		SELECT p.id, p.user_id, p.name, p.description, p.is_favorite, p.created_at, p.updated_at,
-		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) as story_count
+		SELECT p.id, p.user_id, p.name, p.description,
+		       CASE WHEN p.user_id = $1::uuid THEN p.is_favorite ELSE FALSE END AS is_favorite,
+		       p.created_at, p.updated_at,
+		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) AS story_count,
+		       CASE WHEN p.user_id = $1::uuid THEN 'owner' ELSE COALESCE(sh.permission, '') END AS role,
+		       CASE WHEN p.user_id = $1::uuid THEN '' ELSE owner."fullName" END AS owner_name
 		FROM playlists p
-		WHERE p.user_id = $1::uuid
-		ORDER BY p.is_favorite DESC, p.created_at DESC`, userID)
+		JOIN users owner ON owner.id = p.user_id
+		LEFT JOIN playlist_shares sh ON sh.playlist_id = p.id AND sh.user_id = $1::uuid
+		WHERE p.user_id = $1::uuid OR sh.user_id = $1::uuid
+		ORDER BY (p.user_id = $1::uuid) DESC, is_favorite DESC, p.created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -865,12 +1221,110 @@ func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
 	var list []model.Playlist = []model.Playlist{}
 	for rows.Next() {
 		var p model.Playlist
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.IsFavorite, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Description, &p.IsFavorite, &p.CreatedAt, &p.UpdatedAt, &p.StoryCount, &p.Role, &p.OwnerName); err != nil {
 			return nil, err
 		}
 		list = append(list, p)
 	}
 	return list, nil
+}
+
+// --- Story playlist sharing ---
+
+func (r *StoryRepo) PlaylistOwner(playlistID int) (string, error) {
+	var ownerID string
+	err := r.db.QueryRow(`SELECT user_id FROM playlists WHERE id = $1`, playlistID).Scan(&ownerID)
+	return ownerID, err
+}
+
+func (r *StoryRepo) ListPlaylistShares(playlistID int) ([]model.PlaylistShare, error) {
+	rows, err := r.db.Query(
+		`SELECT u.id, u."fullName", u.email, s.permission, s.created_at
+		 FROM playlist_shares s JOIN users u ON u.id = s.user_id
+		 WHERE s.playlist_id = $1 ORDER BY s.created_at DESC`, playlistID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []model.PlaylistShare{}
+	for rows.Next() {
+		var s model.PlaylistShare
+		if err := rows.Scan(&s.UserID, &s.FullName, &s.Email, &s.Permission, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, s)
+	}
+	return items, nil
+}
+
+func (r *StoryRepo) SearchPlaylistShareCandidates(playlistID int, ownerID, like string) ([]model.ShareCandidate, error) {
+	rows, err := r.db.Query(
+		`SELECT id, "fullName", email FROM users
+		 WHERE (lower("fullName") LIKE $1 OR lower(email) LIKE $1)
+		   AND id != $2
+		   AND id NOT IN (SELECT user_id FROM playlist_shares WHERE playlist_id = $3)
+		 ORDER BY "fullName" ASC LIMIT 5`, like, ownerID, playlistID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []model.ShareCandidate{}
+	for rows.Next() {
+		var c model.ShareCandidate
+		if err := rows.Scan(&c.UserID, &c.FullName, &c.Email); err != nil {
+			return nil, err
+		}
+		items = append(items, c)
+	}
+	return items, nil
+}
+
+func (r *StoryRepo) UserIDByEmail(email string) (string, error) {
+	var id string
+	err := r.db.QueryRow(`SELECT id FROM users WHERE lower(email) = $1`, email).Scan(&id)
+	return id, err
+}
+
+func (r *StoryRepo) AddPlaylistShare(playlistID int, targetID, permission string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO playlist_shares (playlist_id, user_id, permission)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (playlist_id, user_id) DO UPDATE SET permission = EXCLUDED.permission`,
+		playlistID, targetID, permission,
+	)
+	return err
+}
+
+func (r *StoryRepo) GetPlaylistShare(playlistID int, targetID string) (*model.PlaylistShare, error) {
+	var s model.PlaylistShare
+	err := r.db.QueryRow(
+		`SELECT u.id, u."fullName", u.email, s.permission, s.created_at
+		 FROM playlist_shares s JOIN users u ON u.id = s.user_id
+		 WHERE s.playlist_id = $1 AND s.user_id = $2`, playlistID, targetID,
+	).Scan(&s.UserID, &s.FullName, &s.Email, &s.Permission, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *StoryRepo) UpdatePlaylistShare(playlistID int, targetID, permission string) (int64, error) {
+	res, err := r.db.Exec(
+		`UPDATE playlist_shares SET permission = $1 WHERE playlist_id = $2 AND user_id = $3`,
+		permission, playlistID, targetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+func (r *StoryRepo) RemovePlaylistShare(playlistID int, targetID string) error {
+	_, err := r.db.Exec(`DELETE FROM playlist_shares WHERE playlist_id = $1 AND user_id = $2`, playlistID, targetID)
+	return err
 }
 
 func (r *StoryRepo) SetPlaylistFavorite(id int, userID string, isFavorite bool) error {
