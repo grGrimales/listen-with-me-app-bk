@@ -955,6 +955,17 @@ func (h *StoryHandler) SetPlaylistFavorite(w http.ResponseWriter, r *http.Reques
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// Owners and users the playlist is shared with can each keep their own favorite.
+	access, err := h.stories.HasPlaylistAccess(userID, id)
+	if err != nil {
+		log.Printf("Error checking playlist access %d: %v", id, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !access {
+		jsonError(w, "playlist not found or no access", http.StatusForbidden)
+		return
+	}
 	if err := h.stories.SetPlaylistFavorite(id, userID, req.IsFavorite); err != nil {
 		log.Printf("Error setting favorite for playlist %d: %v", id, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)

@@ -1203,7 +1203,7 @@ func (r *StoryRepo) ListPlaylists(userID string) ([]model.Playlist, error) {
 	// Owned playlists + playlists shared with the user. Owned first, then favorites, newest.
 	rows, err := r.db.Query(`
 		SELECT p.id, p.user_id, p.name, p.description,
-		       CASE WHEN p.user_id = $1::uuid THEN p.is_favorite ELSE FALSE END AS is_favorite,
+		       EXISTS(SELECT 1 FROM playlist_favorites f WHERE f.playlist_id = p.id AND f.user_id = $1::uuid) AS is_favorite,
 		       p.created_at, p.updated_at,
 		       (SELECT COUNT(*) FROM playlist_stories WHERE playlist_id = p.id) AS story_count,
 		       CASE WHEN p.user_id = $1::uuid THEN 'owner' ELSE COALESCE(sh.permission, '') END AS role,
@@ -1327,12 +1327,33 @@ func (r *StoryRepo) RemovePlaylistShare(playlistID int, targetID string) error {
 	return err
 }
 
+// SetPlaylistFavorite toggles the current user's own favorite (per-user, works for
+// owners and users the playlist was shared with).
 func (r *StoryRepo) SetPlaylistFavorite(id int, userID string, isFavorite bool) error {
+	if isFavorite {
+		_, err := r.db.Exec(
+			`INSERT INTO playlist_favorites (playlist_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			id, userID,
+		)
+		return err
+	}
 	_, err := r.db.Exec(
-		`UPDATE playlists SET is_favorite = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3`,
-		isFavorite, id, userID,
+		`DELETE FROM playlist_favorites WHERE playlist_id = $1 AND user_id = $2`, id, userID,
 	)
 	return err
+}
+
+// HasPlaylistAccess reports whether the user owns or has a share for the playlist.
+func (r *StoryRepo) HasPlaylistAccess(userID string, playlistID int) (bool, error) {
+	var ok bool
+	err := r.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM playlists p
+			LEFT JOIN playlist_shares s ON s.playlist_id = p.id AND s.user_id = $1
+			WHERE p.id = $2 AND (p.user_id = $1 OR s.user_id = $1)
+		)`, userID, playlistID,
+	).Scan(&ok)
+	return ok, err
 }
 
 func (r *StoryRepo) DeletePlaylist(id int, userID string) error {
