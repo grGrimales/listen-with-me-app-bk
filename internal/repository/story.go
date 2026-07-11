@@ -794,13 +794,16 @@ func (r *StoryRepo) FindStorySegment(storyID int, phrase string) (*AudioSegment,
 	return nil, nil
 }
 
-// PlaylistsContainingStory returns the user's story playlists that contain the story.
+// PlaylistsContainingStory returns the story playlists that contain the story and
+// that the user can access — both owned and playlists shared with the user. This
+// lets a shared user build their own vocabulary playlist for a shared collection.
 func (r *StoryRepo) PlaylistsContainingStory(userID string, storyID int) ([]StoryPlaylistRef, error) {
 	rows, err := r.db.Query(
-		`SELECT p.id, p.name
+		`SELECT DISTINCT p.id, p.name
 		 FROM playlists p
 		 JOIN playlist_stories ps ON ps.playlist_id = p.id
-		 WHERE p.user_id = $1 AND ps.story_id = $2
+		 LEFT JOIN playlist_shares sh ON sh.playlist_id = p.id AND sh.user_id = $1
+		 WHERE ps.story_id = $2 AND (p.user_id = $1 OR sh.user_id = $1)
 		 ORDER BY p.name`, userID, storyID,
 	)
 	if err != nil {
@@ -867,11 +870,15 @@ func (r *StoryRepo) UpsertStoryPlaylistPhrase(userID string, storyPlaylistID int
 		audioURL, startMs, endMs = seg.AudioURL, seg.StartMs, seg.EndMs
 	}
 
-	// Dedup by lower(text): update the segment if it already exists, else insert.
+	// Dedup by (text, source story): the same word is one entry within a story, but
+	// the same word saved from a DIFFERENT story becomes a new, independent phrase.
 	var existing int
 	err = tx.QueryRow(
-		`SELECT id FROM phrases WHERE phrase_group_id = $1 AND lower(text) = lower($2) LIMIT 1`,
-		groupID, text,
+		`SELECT id FROM phrases
+		 WHERE phrase_group_id = $1 AND lower(text) = lower($2)
+		   AND source_story_id IS NOT DISTINCT FROM $3
+		 LIMIT 1`,
+		groupID, text, sourceStoryID,
 	).Scan(&existing)
 	if err == sql.ErrNoRows {
 		var pos int
@@ -1459,6 +1466,24 @@ func (r *StoryRepo) ReorderUserVocabulary(userID string, storyID int, ids []int)
 
 func (r *StoryRepo) DeleteUserVocabulary(id int, userID string) error {
 	_, err := r.db.Exec(`DELETE FROM user_story_vocabulary WHERE id = $1 AND user_id = $2`, id, userID)
+	return err
+}
+
+// RemoveStoryPlaylistPhrases deletes the matching phrase from all of the user's
+// story-linked word playlists (same source story + text). Cascades drop its
+// reviews / zen listens / SRS — losing those stats is intentional here.
+func (r *StoryRepo) RemoveStoryPlaylistPhrases(userID string, storyID int, phrase string) error {
+	_, err := r.db.Exec(`
+		DELETE FROM phrases ph
+		USING phrase_groups g, phrase_playlists pp
+		WHERE ph.phrase_group_id = g.id
+		  AND g.phrase_playlist_id = pp.id
+		  AND pp.user_id = $1
+		  AND pp.story_playlist_id IS NOT NULL
+		  AND ph.source_story_id = $2
+		  AND lower(ph.text) = lower($3)`,
+		userID, storyID, phrase,
+	)
 	return err
 }
 

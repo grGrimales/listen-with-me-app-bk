@@ -594,6 +594,7 @@ type phraseItem struct {
 	Position        int        `json:"position"`
 	CreatedAt       string     `json:"created_at"`
 	ReviewCount     int        `json:"review_count"`
+	ZenCount        int        `json:"zen_count"`
 	PollyAudioURLF  string     `json:"polly_audio_url_female"`
 	PollyAudioURLM  string     `json:"polly_audio_url_male"`
 	SourceAudioURL  string     `json:"source_audio_url"`
@@ -786,6 +787,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		        COALESCE(ph.polly_audio_url_male, ''),
 		        COALESCE(ph.source_audio_url, ''), ph.source_start_ms, ph.source_end_ms,
 		        COALESCE(rc.review_count, 0) AS review_count,
+		        COALESCE(zc.zen_count, 0) AS zen_count,
 		        srs.ease_factor, srs.interval_days, srs.repetitions, srs.lapses,
 		        srs.last_reviewed_at, srs.next_review_at
 		 FROM phrase_groups g
@@ -795,6 +797,11 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		     FROM phrase_reviews WHERE user_id = $2
 		     GROUP BY phrase_id
 		 ) rc ON rc.phrase_id = ph.id
+		 LEFT JOIN (
+		     SELECT phrase_id, COUNT(*) AS zen_count
+		     FROM phrase_zen_listens WHERE user_id = $2
+		     GROUP BY phrase_id
+		 ) zc ON zc.phrase_id = ph.id
 		 LEFT JOIN user_phrase_srs srs ON srs.phrase_id = ph.id AND srs.user_id = $2
 		 WHERE g.phrase_playlist_id = $1
 		 ORDER BY g.position, g.id, ph.position, ph.id`,
@@ -818,14 +825,14 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		var phCreated sql.NullTime
 		var phPollyURLF, phPollyURLM, phSourceURL string
 		var phSourceStart, phSourceEnd sql.NullInt64
-		var reviewCount int
+		var reviewCount, zenCount int
 		var srsEF, srsInterval sql.NullFloat64
 		var srsReps, srsLapses sql.NullInt64
 		var srsLast, srsNext sql.NullTime
 		if err := rows.Scan(&gID, &gName, &gPos, &phID, &phText, &phTr, &phPron, &phPos, &phCreated,
 			&phPollyURLF, &phPollyURLM,
 			&phSourceURL, &phSourceStart, &phSourceEnd,
-			&reviewCount, &srsEF, &srsInterval, &srsReps, &srsLapses, &srsLast, &srsNext); err != nil {
+			&reviewCount, &zenCount, &srsEF, &srsInterval, &srsReps, &srsLapses, &srsLast, &srsNext); err != nil {
 			log.Printf("GetPlaylist scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -844,6 +851,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 				PronunciationES: phPron.String,
 				Position:        int(phPos.Int64),
 				ReviewCount:     reviewCount,
+				ZenCount:        zenCount,
 				PollyAudioURLF:  phPollyURLF,
 				PollyAudioURLM:  phPollyURLM,
 				SourceAudioURL:  phSourceURL,
@@ -1867,6 +1875,251 @@ func (h *PhraseHandler) MyStatsDetailed(w http.ResponseWriter, r *http.Request) 
 	rows.Close()
 
 	jsonOK(w, stats)
+}
+
+// POST /api/phrases/{id}/zen-listen  body: {playlist_id}
+// Logs an independent Zen listen (separate from reviews).
+func (h *PhraseHandler) LogZenListen(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	phraseID, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		PlaylistID *int `json:"playlist_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if _, err := h.db.Exec(
+		`INSERT INTO phrase_zen_listens (user_id, phrase_id, playlist_id) VALUES ($1, $2, $3)`,
+		userID, phraseID, body.PlaylistID,
+	); err != nil {
+		log.Printf("LogZenListen insert: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET /api/phrase-zen-stats/leaderboard?limit=10 — top users by Zen listens per period.
+func (h *PhraseHandler) ZenLeaderboard(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.userIDFromContext(r); err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+	periods := []struct{ key, filter string }{
+		{"day", "listened_at >= date_trunc('day', now())"},
+		{"week", "listened_at >= date_trunc('week', now())"},
+		{"month", "listened_at >= date_trunc('month', now())"},
+		{"year", "listened_at >= date_trunc('year', now())"},
+		{"all", "TRUE"},
+	}
+	result := map[string][]leaderboardRow{}
+	for _, p := range periods {
+		q := fmt.Sprintf(`
+			SELECT u.id, u."fullName", COUNT(pr.id) AS c
+			FROM phrase_zen_listens pr
+			JOIN users u ON u.id = pr.user_id
+			WHERE %s
+			GROUP BY u.id, u."fullName"
+			ORDER BY c DESC, u."fullName" ASC
+			LIMIT $1`, p.filter)
+		rows, err := h.db.Query(q, limit)
+		if err != nil {
+			log.Printf("ZenLeaderboard %s query: %v", p.key, err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		items := []leaderboardRow{}
+		for rows.Next() {
+			var row leaderboardRow
+			if err := rows.Scan(&row.UserID, &row.FullName, &row.Count); err != nil {
+				rows.Close()
+				log.Printf("ZenLeaderboard %s scan: %v", p.key, err)
+				jsonError(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			items = append(items, row)
+		}
+		rows.Close()
+		result[p.key] = items
+	}
+	jsonOK(w, result)
+}
+
+// GET /api/phrase-zen-stats/me/detailed — same shape as MyStatsDetailed but for Zen listens.
+func (h *PhraseHandler) MyZenStatsDetailed(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	stats, err := h.computeListenStats(userID, "phrase_zen_listens", "listened_at")
+	if err != nil {
+		log.Printf("MyZenStatsDetailed: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, stats)
+}
+
+// computeListenStats builds the rich personal stats from a listens/reviews table.
+// table and timeCol are trusted internal constants (never user input).
+func (h *PhraseHandler) computeListenStats(userID, table, timeCol string) (*detailedStats, error) {
+	stats := &detailedStats{
+		Counters:             map[string]int{"day": 0, "week": 0, "month": 0, "year": 0, "all": 0},
+		Streak:               map[string]int{"current": 0, "longest": 0},
+		Last30Days:           []dayCount{},
+		TopPlaylists:         []topPlaylist{},
+		LanguageDistribution: []languageCount{},
+	}
+
+	var firstAt sql.NullTime
+	var cDay, cWeek, cMonth, cYear, cAll int
+	if err := h.db.QueryRow(fmt.Sprintf(`
+		SELECT
+			COUNT(*) FILTER (WHERE %[2]s >= date_trunc('day',   now())) AS day,
+			COUNT(*) FILTER (WHERE %[2]s >= date_trunc('week',  now())) AS week,
+			COUNT(*) FILTER (WHERE %[2]s >= date_trunc('month', now())) AS month,
+			COUNT(*) FILTER (WHERE %[2]s >= date_trunc('year',  now())) AS year,
+			COUNT(*) AS total,
+			COUNT(DISTINCT phrase_id) AS unique_phrases,
+			COUNT(DISTINCT date_trunc('day', %[2]s)::date) AS active_days,
+			MIN(%[2]s) AS first_at
+		FROM %[1]s WHERE user_id = $1`, table, timeCol), userID,
+	).Scan(&cDay, &cWeek, &cMonth, &cYear, &cAll, &stats.UniquePhrases, &stats.ActiveDays, &firstAt); err != nil {
+		return nil, err
+	}
+	stats.Counters["day"], stats.Counters["week"], stats.Counters["month"], stats.Counters["year"], stats.Counters["all"] = cDay, cWeek, cMonth, cYear, cAll
+	if firstAt.Valid {
+		s := firstAt.Time.Format("2006-01-02T15:04:05Z07:00")
+		stats.FirstReviewAt = &s
+	}
+
+	var currentStreak, longestStreak sql.NullInt64
+	if err := h.db.QueryRow(fmt.Sprintf(`
+		WITH days AS (
+			SELECT DISTINCT date_trunc('day', %[2]s)::date AS d FROM %[1]s WHERE user_id = $1
+		),
+		grouped AS (SELECT d, d - (ROW_NUMBER() OVER (ORDER BY d))::int AS grp FROM days),
+		streaks AS (SELECT grp, COUNT(*) AS len, MAX(d) AS end_date FROM grouped GROUP BY grp)
+		SELECT
+			COALESCE(MAX(len), 0) AS longest,
+			COALESCE(MAX(CASE WHEN end_date = CURRENT_DATE OR end_date = CURRENT_DATE - 1 THEN len ELSE 0 END), 0) AS current
+		FROM streaks`, table, timeCol), userID,
+	).Scan(&longestStreak, &currentStreak); err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	stats.Streak["longest"] = int(longestStreak.Int64)
+	stats.Streak["current"] = int(currentStreak.Int64)
+
+	var bdDate sql.NullTime
+	var bdCount sql.NullInt64
+	if err := h.db.QueryRow(fmt.Sprintf(`
+		SELECT date_trunc('day', %[2]s)::date AS d, COUNT(*) AS c
+		FROM %[1]s WHERE user_id = $1 GROUP BY d ORDER BY c DESC, d DESC LIMIT 1`, table, timeCol), userID,
+	).Scan(&bdDate, &bdCount); err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if bdDate.Valid {
+		stats.BestDay = &dayCount{Date: bdDate.Time.Format("2006-01-02"), Count: int(bdCount.Int64)}
+	}
+
+	rows, err := h.db.Query(fmt.Sprintf(`
+		SELECT date_trunc('day', %[2]s)::date AS d, COUNT(*) AS c
+		FROM %[1]s WHERE user_id = $1 AND %[2]s >= CURRENT_DATE - INTERVAL '29 days'
+		GROUP BY d ORDER BY d`, table, timeCol), userID)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for rows.Next() {
+		var d sql.NullTime
+		var c int
+		if err := rows.Scan(&d, &c); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if d.Valid {
+			counts[d.Time.Format("2006-01-02")] = c
+		}
+	}
+	rows.Close()
+	now := time.Now().UTC().Truncate(24 * time.Hour)
+	for i := 29; i >= 0; i-- {
+		key := now.AddDate(0, 0, -i).Format("2006-01-02")
+		stats.Last30Days = append(stats.Last30Days, dayCount{Date: key, Count: counts[key]})
+	}
+
+	rows, err = h.db.Query(fmt.Sprintf(`
+		SELECT pp.id, pp.name, pp.language, COUNT(pr.id) AS c
+		FROM %[1]s pr
+		JOIN phrases ph        ON ph.id = pr.phrase_id
+		JOIN phrase_groups pg  ON pg.id = ph.phrase_group_id
+		JOIN phrase_playlists pp ON pp.id = pg.phrase_playlist_id
+		WHERE pr.user_id = $1
+		GROUP BY pp.id, pp.name, pp.language ORDER BY c DESC, pp.name ASC LIMIT 5`, table), userID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tp topPlaylist
+		if err := rows.Scan(&tp.ID, &tp.Name, &tp.Language, &tp.Count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.TopPlaylists = append(stats.TopPlaylists, tp)
+	}
+	rows.Close()
+
+	rows, err = h.db.Query(fmt.Sprintf(`
+		SELECT pp.language, COUNT(pr.id) AS c
+		FROM %[1]s pr
+		JOIN phrases ph        ON ph.id = pr.phrase_id
+		JOIN phrase_groups pg  ON pg.id = ph.phrase_group_id
+		JOIN phrase_playlists pp ON pp.id = pg.phrase_playlist_id
+		WHERE pr.user_id = $1
+		GROUP BY pp.language ORDER BY c DESC`, table), userID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var lc languageCount
+		if err := rows.Scan(&lc.Language, &lc.Count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stats.LanguageDistribution = append(stats.LanguageDistribution, lc)
+	}
+	rows.Close()
+
+	rows, err = h.db.Query(fmt.Sprintf(`
+		SELECT EXTRACT(HOUR FROM %[2]s)::int AS h, COUNT(*) AS c
+		FROM %[1]s WHERE user_id = $1 GROUP BY h`, table, timeCol), userID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var hh, c int
+		if err := rows.Scan(&hh, &c); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if hh >= 0 && hh < 24 {
+			stats.HourDistribution[hh] = c
+		}
+	}
+	rows.Close()
+
+	return stats, nil
 }
 
 func (h *PhraseHandler) userIDFromContext(r *http.Request) (string, error) {

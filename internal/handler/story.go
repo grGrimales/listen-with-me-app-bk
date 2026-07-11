@@ -1355,11 +1355,22 @@ func (h *StoryHandler) DeleteUserVocabulary(w http.ResponseWriter, r *http.Reque
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Look up the word first so we can also remove it from the story word playlists.
+	vocab, _ := h.stories.GetUserVocabByID(id, userID)
+
 	if err := h.stories.DeleteUserVocabulary(id, userID); err != nil {
 		log.Printf("Error deleting user vocabulary %d: %v", id, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Also drop it from the user's story-linked word playlists (stats are discarded).
+	if vocab != nil {
+		if err := h.stories.RemoveStoryPlaylistPhrases(userID, vocab.StoryID, vocab.Phrase); err != nil {
+			log.Printf("DeleteUserVocabulary remove story phrase: %v", err)
+		}
+	}
+
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 

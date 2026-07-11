@@ -212,6 +212,7 @@ func Setup() http.Handler {
 		mux.Handle("PATCH /api/phrase-playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(phraseH.UpdateShare)))
 		mux.Handle("DELETE /api/phrase-playlists/{id}/shares/{userID}", middleware.Auth(http.HandlerFunc(phraseH.RemoveShare)))
 		mux.Handle("POST /api/phrases/{id}/review", middleware.Auth(http.HandlerFunc(phraseH.LogReview)))
+		mux.Handle("POST /api/phrases/{id}/zen-listen", middleware.Auth(http.HandlerFunc(phraseH.LogZenListen)))
 		mux.Handle("POST /api/phrases/{id}/rate", middleware.Auth(http.HandlerFunc(phraseH.RatePhrase)))
 		mux.Handle("PUT /api/phrases/{id}", middleware.Auth(http.HandlerFunc(phraseH.UpdatePhrase)))
 		mux.Handle("DELETE /api/phrases/{id}", middleware.Auth(http.HandlerFunc(phraseH.DeletePhrase)))
@@ -223,6 +224,8 @@ func Setup() http.Handler {
 		mux.Handle("GET /api/phrase-stats/leaderboard", middleware.Auth(http.HandlerFunc(phraseH.Leaderboard)))
 		mux.Handle("GET /api/phrase-stats/me", middleware.Auth(http.HandlerFunc(phraseH.MyStats)))
 		mux.Handle("GET /api/phrase-stats/me/detailed", middleware.Auth(http.HandlerFunc(phraseH.MyStatsDetailed)))
+		mux.Handle("GET /api/phrase-zen-stats/leaderboard", middleware.Auth(http.HandlerFunc(phraseH.ZenLeaderboard)))
+		mux.Handle("GET /api/phrase-zen-stats/me/detailed", middleware.Auth(http.HandlerFunc(phraseH.MyZenStatsDetailed)))
 
 		// TTS configuration (admin)
 		mux.Handle("GET /api/tts/voices", admin(http.HandlerFunc(ttsH.ListVoices)))
