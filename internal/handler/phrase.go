@@ -15,17 +15,25 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"listen-with-me/backend/internal/middleware"
 	"listen-with-me/backend/internal/storage"
+	"listen-with-me/backend/internal/tts/elevenlabs"
 	"listen-with-me/backend/internal/tts/polly"
 )
 
 type PhraseHandler struct {
-	db      *sql.DB
-	storage storage.FileStorage
-	polly   *polly.Provider
+	db         *sql.DB
+	storage    storage.FileStorage
+	polly      *polly.Provider
+	elevenlabs *elevenlabs.Provider
 }
 
 func NewPhraseHandler(db *sql.DB, fs storage.FileStorage, pollyProv *polly.Provider) *PhraseHandler {
 	return &PhraseHandler{db: db, storage: fs, polly: pollyProv}
+}
+
+// WithElevenLabs enables single-voice phrase audio generation via ElevenLabs.
+func (h *PhraseHandler) WithElevenLabs(p *elevenlabs.Provider) *PhraseHandler {
+	h.elevenlabs = p
+	return h
 }
 
 
@@ -1410,6 +1418,135 @@ func (h *PhraseHandler) GeneratePollyAudio(w http.ResponseWriter, r *http.Reques
 	}
 
 	jsonOK(w, map[string]any{"audio_url": url, "voice": polly.VoiceFor(language, gender), "cached": false})
+}
+
+// ElevenLabs female voice per language for the single phrase audio.
+// Hope for English, Ana Dias for Portuguese.
+var phraseElevenVoiceID = map[string]string{
+	"en": "tnSpp4vdxKPjI9w0GnoV", // Hope
+	"pt": "MZxV5lN3cv7hi1376O0m", // Ana Dias
+}
+
+const phraseElevenModel = "eleven_v3"
+
+// POST /api/phrases/{id}/audio/generate
+// Generates (or returns cached) the phrase's single audio using ElevenLabs with the
+// female voice for its playlist's language (Hope for en, Ana Dias for pt). The audio is
+// cached in polly_audio_url_female, so phrases that already have audio keep it as-is.
+func (h *PhraseHandler) GeneratePhraseAudio(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.userIDFromContext(r); err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	phraseID, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if h.elevenlabs == nil {
+		jsonError(w, "elevenlabs is not configured on the server", http.StatusServiceUnavailable)
+		return
+	}
+	if h.storage == nil {
+		jsonError(w, "audio storage is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Load phrase text, playlist language, and any cached audio URL.
+	var text, language, cached string
+	err = h.db.QueryRow(
+		`SELECT ph.text, pl.language, COALESCE(ph.polly_audio_url_female, '')
+		 FROM phrases ph
+		 JOIN phrase_groups g ON g.id = ph.phrase_group_id
+		 JOIN phrase_playlists pl ON pl.id = g.phrase_playlist_id
+		 WHERE ph.id = $1`, phraseID,
+	).Scan(&text, &language, &cached)
+	if err == sql.ErrNoRows {
+		jsonError(w, "phrase not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("GeneratePhraseAudio load: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if cached != "" {
+		jsonOK(w, map[string]any{"audio_url": cached, "cached": true})
+		return
+	}
+
+	voiceID, ok := phraseElevenVoiceID[language]
+	if !ok {
+		voiceID = phraseElevenVoiceID["en"]
+	}
+
+	// Request audio + word-level timestamps (alignment). We don't use the timestamps in
+	// the UI yet, but persist them for potential future features (click-to-play/karaoke).
+	res, err := h.elevenlabs.GenerateAudioWithTimestamps(r.Context(), text, voiceID, phraseElevenModel)
+	if err != nil {
+		log.Printf("GeneratePhraseAudio synth: %v", err)
+		jsonError(w, "audio generation failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	filename := fmt.Sprintf("phrases/audio/%d.mp3", phraseID)
+	url, err := h.storage.Upload(r.Context(), filename, bytes.NewReader(res.Data), res.ContentType)
+	if err != nil {
+		log.Printf("GeneratePhraseAudio upload: %v", err)
+		jsonError(w, "failed to store audio", http.StatusInternalServerError)
+		return
+	}
+
+	// Total audio duration ≈ end of the last aligned word.
+	durationMs := 0
+	if n := len(res.Words); n > 0 {
+		durationMs = res.Words[n-1].EndMs
+	}
+
+	if _, err := h.db.Exec(
+		`UPDATE phrases
+		   SET polly_audio_url_female = $1, audio_model = $2, audio_voice_id = $3, audio_duration_ms = $4
+		 WHERE id = $5`,
+		url, phraseElevenModel, voiceID, durationMs, phraseID,
+	); err != nil {
+		log.Printf("GeneratePhraseAudio persist url: %v", err)
+	}
+
+	if err := h.savePhraseWordTimestamps(phraseID, res.Words); err != nil {
+		log.Printf("GeneratePhraseAudio save word timestamps: %v", err)
+	}
+
+	jsonOK(w, map[string]any{
+		"audio_url":   url,
+		"cached":      false,
+		"model":       phraseElevenModel,
+		"voice_id":    voiceID,
+		"duration_ms": durationMs,
+		"word_count":  len(res.Words),
+	})
+}
+
+// savePhraseWordTimestamps replaces the stored word-level timestamps for a phrase.
+func (h *PhraseHandler) savePhraseWordTimestamps(phraseID int, words []elevenlabs.AlignedWord) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM phrase_word_timestamps WHERE phrase_id = $1`, phraseID); err != nil {
+		return err
+	}
+	for i, wd := range words {
+		if _, err := tx.Exec(
+			`INSERT INTO phrase_word_timestamps (phrase_id, word_index, word, start_ms, end_ms)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			phraseID, i, wd.Word, wd.StartMs, wd.EndMs,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // applySM2 returns updated (easeFactor, intervalDays, repetitions, lapsesDelta)

@@ -110,6 +110,9 @@ func Setup() http.Handler {
 			}
 		}
 		phraseH := handler.NewPhraseHandler(db, audioStorage, pollyProv)
+		if elevenlabsAPIKey != "" {
+			phraseH = phraseH.WithElevenLabs(elevenLabsProv)
+		}
 
 		mux := http.NewServeMux()
 
@@ -218,6 +221,7 @@ func Setup() http.Handler {
 		mux.Handle("DELETE /api/phrases/{id}", middleware.Auth(http.HandlerFunc(phraseH.DeletePhrase)))
 		mux.Handle("PUT /api/phrase-groups/{id}", middleware.Auth(http.HandlerFunc(phraseH.UpdateGroup)))
 		mux.Handle("DELETE /api/phrase-groups/{id}", middleware.Auth(http.HandlerFunc(phraseH.DeleteGroup)))
+		mux.Handle("POST /api/phrases/{id}/audio/generate", middleware.Auth(http.HandlerFunc(phraseH.GeneratePhraseAudio)))
 		mux.Handle("POST /api/phrases/{id}/audio/polly", middleware.Auth(http.HandlerFunc(phraseH.GeneratePollyAudio)))
 		mux.Handle("GET /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.GetPhraseVocabularyInfo)))
 		mux.Handle("POST /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.AddPhraseVocabulary)))
