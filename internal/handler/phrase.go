@@ -2259,6 +2259,239 @@ func (h *PhraseHandler) computeListenStats(userID, table, timeCol string) (*deta
 	return stats, nil
 }
 
+// ── Writing evaluation ────────────────────────────────────────────────────────
+// The user is shown the Spanish translation and types the phrase in the target
+// language. Every attempt is stored (hit or miss) together with what they wrote.
+
+// normalizeAnswer makes the comparison forgiving about the things that aren't
+// really mistakes: casing, surrounding punctuation, curly quotes and extra spaces.
+// Accents stay significant — they're part of the spelling in pt/es.
+func normalizeAnswer(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.NewReplacer(
+		"’", "'", "‘", "'", // ’ ‘
+		"“", "\"", "”", "\"", // “ ”
+		"—", "-", "–", "-", // — –
+	).Replace(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '.', ',', '!', '?', ';', ':', '¡', '¿', '"', '(', ')', '…':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	// strings.Fields collapses any run of whitespace.
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+type evaluationStatsRow struct {
+	PhraseID      int     `json:"phrase_id"`
+	CorrectCount  int     `json:"correct_count"`
+	FailedCount   int     `json:"failed_count"`
+	TotalAttempts int     `json:"total_attempts"`
+	LastAttemptAt *string `json:"last_attempt_at"`
+	LastCorrect   *bool   `json:"last_correct"`
+}
+
+type evaluationAttempt struct {
+	ID         int64  `json:"id"`
+	IsCorrect  bool   `json:"is_correct"`
+	UserAnswer string `json:"user_answer"`
+	Expected   string `json:"expected"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// POST /api/phrases/{id}/evaluate  body: {playlist_id, user_answer}
+// Correctness is decided server-side against the stored phrase text.
+func (h *PhraseHandler) EvaluatePhrase(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	phraseID, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		PlaylistID *int   `json:"playlist_id"`
+		UserAnswer string `json:"user_answer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve the phrase and the playlist it belongs to, then check access.
+	var expected string
+	var ownerPlaylistID int
+	err = h.db.QueryRow(`
+		SELECT ph.text, g.phrase_playlist_id
+		FROM phrases ph
+		JOIN phrase_groups g ON g.id = ph.phrase_group_id
+		WHERE ph.id = $1`, phraseID,
+	).Scan(&expected, &ownerPlaylistID)
+	if err == sql.ErrNoRows {
+		jsonError(w, "phrase not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("EvaluatePhrase lookup: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	ok, err := h.hasPlaylistAccess(userID, ownerPlaylistID)
+	if err != nil || !ok {
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Always attribute the attempt to the playlist that actually owns the phrase.
+	playlistID := ownerPlaylistID
+
+	isCorrect := normalizeAnswer(body.UserAnswer) == normalizeAnswer(expected)
+
+	if _, err := h.db.Exec(
+		`INSERT INTO phrase_evaluations (user_id, phrase_id, playlist_id, is_correct, user_answer, expected)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		userID, phraseID, playlistID, isCorrect, strings.TrimSpace(body.UserAnswer), expected,
+	); err != nil {
+		log.Printf("EvaluatePhrase insert: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Running totals for this phrase so the UI can update without a refetch.
+	var stats evaluationStatsRow
+	stats.PhraseID = phraseID
+	if err := h.db.QueryRow(`
+		SELECT COUNT(*) FILTER (WHERE is_correct),
+		       COUNT(*) FILTER (WHERE NOT is_correct),
+		       COUNT(*)
+		FROM phrase_evaluations WHERE user_id = $1 AND phrase_id = $2`,
+		userID, phraseID,
+	).Scan(&stats.CorrectCount, &stats.FailedCount, &stats.TotalAttempts); err != nil {
+		log.Printf("EvaluatePhrase stats: %v", err)
+	}
+
+	jsonOK(w, map[string]any{
+		"is_correct": isCorrect,
+		"expected":   expected,
+		"stats":      stats,
+	})
+}
+
+// GET /api/phrase-playlists/{id}/evaluation-stats
+// Per-phrase totals for the signed-in user across the whole playlist.
+func (h *PhraseHandler) PlaylistEvaluationStats(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	playlistID, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	ok, err := h.hasPlaylistAccess(userID, playlistID)
+	if err != nil || !ok {
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	rows, err := h.db.Query(`
+		SELECT ph.id,
+		       COUNT(e.id) FILTER (WHERE e.is_correct)     AS correct_count,
+		       COUNT(e.id) FILTER (WHERE NOT e.is_correct) AS failed_count,
+		       COUNT(e.id)                                 AS total_attempts,
+		       MAX(e.created_at)                           AS last_attempt_at,
+		       (ARRAY_AGG(e.is_correct ORDER BY e.created_at DESC))[1] AS last_correct
+		FROM phrases ph
+		JOIN phrase_groups g ON g.id = ph.phrase_group_id
+		LEFT JOIN phrase_evaluations e ON e.phrase_id = ph.id AND e.user_id = $1
+		WHERE g.phrase_playlist_id = $2
+		GROUP BY ph.id`,
+		userID, playlistID,
+	)
+	if err != nil {
+		log.Printf("PlaylistEvaluationStats query: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	items := []evaluationStatsRow{}
+	for rows.Next() {
+		var s evaluationStatsRow
+		var last sql.NullTime
+		var lastCorrect sql.NullBool
+		if err := rows.Scan(&s.PhraseID, &s.CorrectCount, &s.FailedCount, &s.TotalAttempts, &last, &lastCorrect); err != nil {
+			log.Printf("PlaylistEvaluationStats scan: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if last.Valid {
+			t := last.Time.Format(time.RFC3339)
+			s.LastAttemptAt = &t
+		}
+		if lastCorrect.Valid {
+			b := lastCorrect.Bool
+			s.LastCorrect = &b
+		}
+		items = append(items, s)
+	}
+	jsonOK(w, items)
+}
+
+// GET /api/phrases/{id}/evaluation-history?limit=50
+// What the user typed on every past attempt, newest first.
+func (h *PhraseHandler) PhraseEvaluationHistory(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	phraseID, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	rows, err := h.db.Query(`
+		SELECT id, is_correct, user_answer, expected, created_at
+		FROM phrase_evaluations
+		WHERE user_id = $1 AND phrase_id = $2
+		ORDER BY created_at DESC
+		LIMIT $3`,
+		userID, phraseID, limit,
+	)
+	if err != nil {
+		log.Printf("PhraseEvaluationHistory query: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	items := []evaluationAttempt{}
+	for rows.Next() {
+		var a evaluationAttempt
+		var created time.Time
+		if err := rows.Scan(&a.ID, &a.IsCorrect, &a.UserAnswer, &a.Expected, &created); err != nil {
+			log.Printf("PhraseEvaluationHistory scan: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		a.CreatedAt = created.Format(time.RFC3339)
+		items = append(items, a)
+	}
+	jsonOK(w, items)
+}
+
 func (h *PhraseHandler) userIDFromContext(r *http.Request) (string, error) {
 	claims, ok := r.Context().Value(middleware.ClaimsKey).(jwt.MapClaims)
 	if !ok {
