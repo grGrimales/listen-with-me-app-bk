@@ -1,6 +1,6 @@
 # Binaries
+# OJO: no uses "/api" aqui — ignoraria la carpeta api/ con el entrypoint de Vercel.
 /main
-/api
 /seed_admin
 /seed_categories
 /seed_full_story
