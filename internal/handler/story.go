@@ -990,7 +990,21 @@ func (h *StoryHandler) AddStoryToPlaylist(w http.ResponseWriter, r *http.Request
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "added"})
+
+	// Words saved from this story BEFORE it joined the playlist never reached the
+	// playlist's word list (AddUserVocabulary only fans out to the playlists holding
+	// the story at save time). Pull them in now so the order of the two actions stops
+	// mattering. Best effort: the story is already in the playlist either way.
+	backfilled := 0
+	if userID, err := h.userIDFromContext(r); err == nil {
+		n, err := h.stories.BackfillStoryPlaylistPhrases(userID, pID, req.StoryID)
+		if err != nil {
+			log.Printf("AddStoryToPlaylist backfill (playlist %d, story %d): %v", pID, req.StoryID, err)
+		}
+		backfilled = n
+	}
+
+	jsonOK(w, map[string]any{"status": "added", "words_backfilled": backfilled})
 }
 
 func (h *StoryHandler) RemoveStoryFromPlaylist(w http.ResponseWriter, r *http.Request) {

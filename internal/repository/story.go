@@ -910,6 +910,52 @@ func (r *StoryRepo) UpsertStoryPlaylistPhrase(userID string, storyPlaylistID int
 	return tx.Commit()
 }
 
+// BackfillStoryPlaylistPhrases pushes the words a user already saved from a story into
+// the word playlist of a story playlist that story has just joined. Saving a word only
+// reaches the playlists holding the story AT THAT MOMENT, so organising a story into a
+// playlist afterwards — the natural order of use — would otherwise leave every word
+// saved before that behind. Idempotent: UpsertStoryPlaylistPhrase dedups by
+// (text, source story), so re-running adds nothing.
+// Returns how many words were pushed.
+func (r *StoryRepo) BackfillStoryPlaylistPhrases(userID string, storyPlaylistID, storyID int) (int, error) {
+	vocab, err := r.ListUserVocabulary(userID, storyID)
+	if err != nil {
+		return 0, err
+	}
+	if len(vocab) == 0 {
+		return 0, nil
+	}
+
+	var playlistName string
+	if err := r.db.QueryRow(
+		`SELECT name FROM playlists WHERE id = $1`, storyPlaylistID,
+	).Scan(&playlistName); err != nil {
+		return 0, err
+	}
+	// The word playlist is the user's own, so it follows their target language.
+	var language string
+	if err := r.db.QueryRow(
+		`SELECT COALESCE(target_language, 'en') FROM users WHERE id = $1`, userID,
+	).Scan(&language); err != nil {
+		return 0, err
+	}
+
+	pushed := 0
+	for _, v := range vocab {
+		// A missing segment is not fatal: the word is stored without audio, exactly as
+		// when its paragraph has no audio yet.
+		seg, err := r.FindStorySegment(storyID, v.Phrase)
+		if err != nil {
+			log.Printf("BackfillStoryPlaylistPhrases segment lookup (story %d, %q): %v", storyID, v.Phrase, err)
+		}
+		if err := r.UpsertStoryPlaylistPhrase(userID, storyPlaylistID, playlistName, language, v.Phrase, storyID, seg); err != nil {
+			return pushed, err
+		}
+		pushed++
+	}
+	return pushed, nil
+}
+
 // --- Voices ---
 
 func (r *StoryRepo) AddVoice(v *model.StoryVoice) error {
