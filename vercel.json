@@ -1,13 +1,3 @@
 {
-  "version": 2,
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/index.go"
-    },
-    {
-      "source": "/health",
-      "destination": "/api/index.go"
-    }
-  ]
+  "version": 2
 }
