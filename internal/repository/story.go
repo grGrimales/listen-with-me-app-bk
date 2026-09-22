@@ -822,7 +822,8 @@ func (r *StoryRepo) PlaylistsContainingStory(userID string, storyID int) ([]Stor
 }
 
 // UpsertStoryPlaylistPhrase adds (or refreshes) a saved word in the phrase playlist
-// tied to a story playlist, creating that playlist and its default group on first use.
+// tied to a story playlist, creating that playlist and the group for the word's source
+// story (named after the story's title) on first use.
 // seg may be nil (the word is stored without audio until its paragraph audio exists).
 func (r *StoryRepo) UpsertStoryPlaylistPhrase(userID string, storyPlaylistID int, storyPlaylistName, language, text string, sourceStoryID int, seg *AudioSegment) error {
 	tx, err := r.db.Begin()
@@ -848,15 +849,37 @@ func (r *StoryRepo) UpsertStoryPlaylistPhrase(userID string, storyPlaylistID int
 		return err
 	}
 
-	// Find or create the default "Words" group.
+	// Words are grouped by the story they were saved from, so the group name is the
+	// story's title. Words with no known story fall back to a generic group.
+	groupName := "Words"
+	if sourceStoryID != 0 {
+		var title string
+		err := tx.QueryRow(`SELECT title FROM stories WHERE id = $1`, sourceStoryID).Scan(&title)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if t := strings.TrimSpace(title); t != "" {
+			groupName = t
+		}
+	}
+
+	// Find or create this story's group inside the word playlist.
 	var groupID int
 	err = tx.QueryRow(
-		`SELECT id FROM phrase_groups WHERE phrase_playlist_id = $1 ORDER BY position, id LIMIT 1`, playlistID,
+		`SELECT id FROM phrase_groups
+		 WHERE phrase_playlist_id = $1 AND lower(name) = lower($2)
+		 ORDER BY position, id LIMIT 1`, playlistID, groupName,
 	).Scan(&groupID)
 	if err == sql.ErrNoRows {
+		var groupPos int
 		if err := tx.QueryRow(
-			`INSERT INTO phrase_groups (phrase_playlist_id, name, position) VALUES ($1, 'Words', 0) RETURNING id`,
-			playlistID,
+			`SELECT COALESCE(MAX(position), -1) + 1 FROM phrase_groups WHERE phrase_playlist_id = $1`, playlistID,
+		).Scan(&groupPos); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(
+			`INSERT INTO phrase_groups (phrase_playlist_id, name, position) VALUES ($1, $2, $3) RETURNING id`,
+			playlistID, groupName, groupPos,
 		).Scan(&groupID); err != nil {
 			return err
 		}
