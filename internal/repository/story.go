@@ -260,9 +260,9 @@ func (r *StoryRepo) UpdateFull(id int, req *model.CreateFullStoryRequest) error 
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, audio_url)
-			 VALUES ($1, $2, $3, $4) RETURNING id`,
-			id, fp.Position, fp.Content, fp.AudioURL,
+			`INSERT INTO paragraphs (story_id, position, content, audio_url, pronunciation_es)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			id, fp.Position, fp.Content, fp.AudioURL, fp.PronunciationES,
 		).Scan(&pID)
 		if err != nil {
 			return err
@@ -348,15 +348,16 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 	for _, fp := range req.Paragraphs {
 		var pID int
 		err = tx.QueryRow(
-			`INSERT INTO paragraphs (story_id, position, content, audio_url)
-			 VALUES ($1, $2, $3, $4) RETURNING id`,
-			story.ID, fp.Position, fp.Content, fp.AudioURL,
+			`INSERT INTO paragraphs (story_id, position, content, audio_url, pronunciation_es)
+			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			story.ID, fp.Position, fp.Content, fp.AudioURL, fp.PronunciationES,
 		).Scan(&pID)
 		if err != nil {
 			return nil, err
 		}
 
-		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content, AudioURL: fp.AudioURL}
+		p := model.Paragraph{ID: pID, StoryID: story.ID, Position: fp.Position, Content: fp.Content,
+			PronunciationES: fp.PronunciationES, AudioURL: fp.AudioURL}
 
 		for i, imgURL := range fp.Images {
 			var imgID int
@@ -432,9 +433,9 @@ func (r *StoryRepo) CreateFull(req *model.CreateFullStoryRequest) (*model.Story,
 
 func (r *StoryRepo) AddParagraph(p *model.Paragraph) error {
 	err := r.db.QueryRow(
-		`INSERT INTO paragraphs (story_id, position, content, audio_url)
-		 VALUES ($1, $2, $3, $4) RETURNING id`,
-		p.StoryID, p.Position, p.Content, p.AudioURL,
+		`INSERT INTO paragraphs (story_id, position, content, audio_url, pronunciation_es)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		p.StoryID, p.Position, p.Content, p.AudioURL, p.PronunciationES,
 	).Scan(&p.ID)
 	if err != nil {
 		return err
@@ -463,9 +464,9 @@ func (r *StoryRepo) SetParagraphAudio(id int, url string) error {
 func (r *StoryRepo) GetParagraphByID(id int) (*model.Paragraph, error) {
 	p := &model.Paragraph{}
 	err := r.db.QueryRow(
-		`SELECT id, story_id, position, content, COALESCE(audio_url,'')
+		`SELECT id, story_id, position, content, COALESCE(audio_url,''), COALESCE(pronunciation_es,'')
 		 FROM paragraphs WHERE id = $1`, id,
-	).Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL)
+	).Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL, &p.PronunciationES)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -484,7 +485,7 @@ func (r *StoryRepo) GetParagraphByID(id int) (*model.Paragraph, error) {
 
 func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	rows, err := r.db.Query(
-		`SELECT id, story_id, position, content, COALESCE(audio_url,'')
+		`SELECT id, story_id, position, content, COALESCE(audio_url,''), COALESCE(pronunciation_es,'')
 		 FROM paragraphs WHERE story_id = $1 ORDER BY position`, storyID,
 	)
 	if err != nil {
@@ -495,7 +496,7 @@ func (r *StoryRepo) listParagraphs(storyID int) ([]model.Paragraph, error) {
 	var paragraphs []model.Paragraph = []model.Paragraph{}
 	for rows.Next() {
 		var p model.Paragraph
-		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL); err != nil {
+		if err := rows.Scan(&p.ID, &p.StoryID, &p.Position, &p.Content, &p.AudioURL, &p.PronunciationES); err != nil {
 			return nil, err
 		}
 
@@ -616,7 +617,6 @@ func (r *StoryRepo) DeleteParagraphImage(id int) error {
 	_, err := r.db.Exec(`DELETE FROM paragraph_images WHERE id = $1`, id)
 	return err
 }
-
 
 // --- Translations ---
 

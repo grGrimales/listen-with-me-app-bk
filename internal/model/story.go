@@ -29,15 +29,16 @@ type Story struct {
 }
 
 type Paragraph struct {
-	ID             int                    `json:"id"`
-	StoryID        int                    `json:"story_id"`
-	Position       int                    `json:"position"`
-	Content        string                 `json:"content"`
-	Images         []ParagraphImage       `json:"images"`
-	AudioURL       string                 `json:"audio_url"`
-	Translations   []ParagraphTranslation `json:"translations,omitempty"`
-	Vocabulary     []Vocabulary           `json:"vocabulary,omitempty"`
-	WordTimestamps []WordTimestamp        `json:"word_timestamps,omitempty"`
+	ID              int                    `json:"id"`
+	StoryID         int                    `json:"story_id"`
+	Position        int                    `json:"position"`
+	Content         string                 `json:"content"`
+	PronunciationES string                 `json:"pronunciation_es"`
+	Images          []ParagraphImage       `json:"images"`
+	AudioURL        string                 `json:"audio_url"`
+	Translations    []ParagraphTranslation `json:"translations,omitempty"`
+	Vocabulary      []Vocabulary           `json:"vocabulary,omitempty"`
+	WordTimestamps  []WordTimestamp        `json:"word_timestamps,omitempty"`
 }
 
 type ParagraphImage struct {
@@ -130,21 +131,22 @@ type CreateVoiceRequest struct {
 // --- Full story creation (single request) ---
 
 type FullParagraph struct {
-	Position     int                        `json:"position"`
-	Content      string                     `json:"content"`
-	Images       []string                   `json:"images"`
-	AudioURL     string                     `json:"audio_url"`
-	Translations []CreateTranslationRequest `json:"translations"`
-	Vocabulary   []CreateVocabularyRequest  `json:"vocabulary"`
+	Position        int                        `json:"position"`
+	Content         string                     `json:"content"`
+	PronunciationES string                     `json:"pronunciation_es"`
+	Images          []string                   `json:"images"`
+	AudioURL        string                     `json:"audio_url"`
+	Translations    []CreateTranslationRequest `json:"translations"`
+	Vocabulary      []CreateVocabularyRequest  `json:"vocabulary"`
 }
 
 type CreateFullStoryRequest struct {
-	Title      string          `json:"title"`
-	Level      string          `json:"level"`
-	CategoryID int             `json:"category_id"`
-	CoverURL   string          `json:"cover_url"`
-	Author     string          `json:"author"`
-	Paragraphs []FullParagraph `json:"paragraphs"`
+	Title      string               `json:"title"`
+	Level      string               `json:"level"`
+	CategoryID int                  `json:"category_id"`
+	CoverURL   string               `json:"cover_url"`
+	Author     string               `json:"author"`
+	Paragraphs []FullParagraph      `json:"paragraphs"`
 	Voices     []CreateVoiceRequest `json:"voices"`
 }
 
