@@ -1,6 +1,6 @@
 ---
 name: translate-story-phrases
-description: Rellena translation_es y pronunciation_es vacíos en las frases de los phrase playlists generados desde historias ("from stories"). Acepta como argumento la URL o el id de un playlist para trabajar solo ese; sin argumento, inventaría todos los que tengan huecos. Genera un script SQL, valida que solo toque esas filas, corrige y revalida hasta que el alcance esté limpio, y recién entonces lo ejecuta. Úsalo cuando el usuario pida traducir/completar frases guardadas desde historias, o cuando aparezcan tarjetas sin traducción ni pronunciación en /phrases/from-stories.
+description: Rellena translation_es y pronunciation_es vacíos en las frases de los phrase playlists generados desde historias ("from stories"). Acepta como argumento la URL o el id de un playlist para trabajar solo ese; sin argumento, inventaría todos los que tengan huecos. Genera un script SQL, valida que solo toque esas filas, corrige y revalida hasta que el alcance esté limpio, y recién entonces lo ejecuta. Además reordena las frases de cada grupo para que sigan el orden del texto de la historia. Úsalo cuando el usuario pida traducir/completar frases guardadas desde historias, o cuando aparezcan tarjetas sin traducción ni pronunciación en /phrases/from-stories.
 user-invocable: true
 ---
 
@@ -91,7 +91,7 @@ GROUP BY p.id;
 |---|---|
 | 0 filas | El playlist no existe. Dilo y detente. |
 | `story_playlist_id IS NULL` | **No es de historias.** Detente y dilo: es un playlist normal o un hijo de vocabulario, y sus traducciones las escribe el usuario. No lo rellenes aunque tenga huecos. |
-| Sin huecos | Ya está completo. Dilo y detente. |
+| Sin huecos | Traducciones completas. Salta al **paso 8** (el orden puede seguir mal). |
 | De historias y con huecos | Adelante al paso 2. |
 
 **Sin argumento** — inventaría todos y pregunta cuál:
@@ -292,11 +292,86 @@ WHERE g.phrase_playlist_id <> <PL> AND ph.updated_at > NOW() - INTERVAL '10 minu
 Si `rows affected` no coincide con el dry-run, **dilo** y revisa antes de seguir
 con otro playlist.
 
-### 8. Reportar
+### 8. Ordenar las frases como en la historia
+
+`UpsertStoryPlaylistPhrase` asigna `position` en el orden en que el usuario va
+guardando las frases, así que una frase guardada más tarde queda al final de su
+grupo aunque esté al principio del texto. En `/phrases/<PL>` cada grupo debe leerse
+como la historia, de principio a fin. Este paso corre **siempre**, aunque no haya
+habido huecos que traducir.
+
+Clave de orden dentro de cada grupo (`phrase_group_id`):
+
+1. `paragraphs.position` del párrafo donde aparece el texto (si el texto aparece en
+   varios párrafos, gana el que tiene el mismo `audio_url` que `ph.source_audio_url`)
+2. `strpos` del texto dentro de ese párrafo
+3. `source_start_ms` (desempata repeticiones)
+4. longitud **descendente**: la frase que contiene a otra va antes que su fragmento
+   anidado (`"because in my experience the slow part is…"` → `"…the slow part"` →
+   `"the slow part"`)
+5. `position` anterior e `id`: estabilidad
+
+Las frases cuyo texto no aparece en ningún párrafo (historia editada después de
+guardarla) van al final de su grupo, en el orden que tenían. **No** se reordenan los
+grupos: `playlist_stories` no tiene un orden propio de historias.
+
+Escribe el CTE una vez en `reorder_cte.sql` (scratchpad) y genera desde él el
+dry-run y el `UPDATE`, igual que en el paso 4:
+
+```sql
+WITH located AS (
+  SELECT ph.id, ph.phrase_group_id, ph.position AS old_pos,
+         loc.par_pos, loc.off, ph.source_start_ms, length(ph.text) AS len
+  FROM phrases ph
+  JOIN phrase_groups g ON g.id = ph.phrase_group_id
+  LEFT JOIN LATERAL (
+    SELECT pa.position AS par_pos, strpos(lower(pa.content), lower(ph.text)) AS off
+    FROM paragraphs pa
+    WHERE pa.story_id = ph.source_story_id
+      AND strpos(lower(pa.content), lower(ph.text)) > 0
+    ORDER BY (pa.audio_url IS NOT DISTINCT FROM ph.source_audio_url) DESC, pa.position
+    LIMIT 1
+  ) loc ON true
+  WHERE g.phrase_playlist_id = <PL>
+),
+ordered AS (
+  SELECT id, old_pos,
+         ROW_NUMBER() OVER (
+           PARTITION BY phrase_group_id
+           ORDER BY par_pos NULLS LAST, off, source_start_ms NULLS LAST, len DESC, old_pos, id
+         ) - 1 AS new_pos
+  FROM located
+)
+```
+
+```bash
+PL=10                                            # el id real del playlist
+sed "s/<PL>/$PL/" reorder_cte.sql > cte.sql
+{ cat cte.sql; echo "SELECT count(*) AS total, count(*) FILTER (WHERE old_pos <> new_pos) AS cambian FROM ordered;"; } > reorder_dry.sql
+{ cat cte.sql; echo "UPDATE phrases ph SET position = o.new_pos FROM ordered o WHERE ph.id = o.id AND ph.position <> o.new_pos;"; } > reorder_fill.sql
+```
+
+1. `go run ./cmd/dbq "@reorder_dry.sql"`. Si `cambian = 0`, el orden ya está bien:
+   dilo y no escribas nada. `total` debe ser igual a `frases` del paso 1.
+2. Respaldo:
+   `go run ./cmd/dbq "SELECT ph.id, ph.phrase_group_id, ph.position FROM phrases ph JOIN phrase_groups g ON g.id = ph.phrase_group_id WHERE g.phrase_playlist_id = <PL>" > backup_pl<PL>_positions.jsonl`
+3. `go run ./cmd/dbq "@reorder_fill.sql"`. Como la sentencia empieza por `WITH`, dbq
+   la trata como consulta e imprime `(0 rows)` en vez de `rows affected`; eso es
+   normal.
+4. Vuelve a correr el dry-run: `cambian` debe dar **0**.
+
+Solo se escribe `position`, y únicamente dentro de `<PL>`. Tampoco se toca
+`updated_at`, así que la comprobación de daño colateral del paso 7 sigue siendo
+válida. No hay un índice único sobre `(phrase_group_id, position)`, así que basta con
+un solo `UPDATE`.
+
+### 9. Reportar
 
 Al usuario: base de datos usada, playlist e historia, filas rellenadas, ruta del
 respaldo y el resultado de las dos verificaciones finales. Menciona una muestra
-de 3-5 traducciones para que pueda juzgar el criterio.
+de 3-5 traducciones para que pueda juzgar el criterio. Del paso 8: cuántas
+posiciones cambiaron, ruta del respaldo de posiciones y cuántas frases no se
+encontraron en el texto, si hubo alguna.
 
 ## Lo que este skill no hace
 
