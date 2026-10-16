@@ -594,21 +594,25 @@ type phrasePlaylistSummary struct {
 	CreatedAt   string `json:"created_at"`
 }
 
+// phraseItem.FocusText is the expression the phrase teaches, as written in Text.
+// WordTimestamps (only sent when FocusText is set) let the card play just that part.
 type phraseItem struct {
-	ID              int        `json:"id"`
-	Text            string     `json:"text"`
-	TranslationES   string     `json:"translation_es"`
-	PronunciationES string     `json:"pronunciation_es"`
-	Position        int        `json:"position"`
-	CreatedAt       string     `json:"created_at"`
-	ReviewCount     int        `json:"review_count"`
-	ZenCount        int        `json:"zen_count"`
-	PollyAudioURLF  string     `json:"polly_audio_url_female"`
-	PollyAudioURLM  string     `json:"polly_audio_url_male"`
-	SourceAudioURL  string     `json:"source_audio_url"`
-	SourceStartMs   *int       `json:"source_start_ms"`
-	SourceEndMs     *int       `json:"source_end_ms"`
-	SRS             *phraseSRS `json:"srs"`
+	ID              int                      `json:"id"`
+	Text            string                   `json:"text"`
+	TranslationES   string                   `json:"translation_es"`
+	PronunciationES string                   `json:"pronunciation_es"`
+	Position        int                      `json:"position"`
+	CreatedAt       string                   `json:"created_at"`
+	ReviewCount     int                      `json:"review_count"`
+	ZenCount        int                      `json:"zen_count"`
+	PollyAudioURLF  string                   `json:"polly_audio_url_female"`
+	PollyAudioURLM  string                   `json:"polly_audio_url_male"`
+	SourceAudioURL  string                   `json:"source_audio_url"`
+	SourceStartMs   *int                     `json:"source_start_ms"`
+	SourceEndMs     *int                     `json:"source_end_ms"`
+	FocusText       string                   `json:"focus_text"`
+	WordTimestamps  []elevenlabs.AlignedWord `json:"word_timestamps,omitempty"`
+	SRS             *phraseSRS               `json:"srs"`
 }
 
 type phraseSRS struct {
@@ -794,6 +798,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		        COALESCE(ph.polly_audio_url_female, ''),
 		        COALESCE(ph.polly_audio_url_male, ''),
 		        COALESCE(ph.source_audio_url, ''), ph.source_start_ms, ph.source_end_ms,
+		        COALESCE(ph.focus_text, ''),
 		        COALESCE(rc.review_count, 0) AS review_count,
 		        COALESCE(zc.zen_count, 0) AS zen_count,
 		        srs.ease_factor, srs.interval_days, srs.repetitions, srs.lapses,
@@ -833,13 +838,14 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		var phCreated sql.NullTime
 		var phPollyURLF, phPollyURLM, phSourceURL string
 		var phSourceStart, phSourceEnd sql.NullInt64
+		var phFocus string
 		var reviewCount, zenCount int
 		var srsEF, srsInterval sql.NullFloat64
 		var srsReps, srsLapses sql.NullInt64
 		var srsLast, srsNext sql.NullTime
 		if err := rows.Scan(&gID, &gName, &gPos, &phID, &phText, &phTr, &phPron, &phPos, &phCreated,
 			&phPollyURLF, &phPollyURLM,
-			&phSourceURL, &phSourceStart, &phSourceEnd,
+			&phSourceURL, &phSourceStart, &phSourceEnd, &phFocus,
 			&reviewCount, &zenCount, &srsEF, &srsInterval, &srsReps, &srsLapses, &srsLast, &srsNext); err != nil {
 			log.Printf("GetPlaylist scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -863,6 +869,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 				PollyAudioURLF:  phPollyURLF,
 				PollyAudioURLM:  phPollyURLM,
 				SourceAudioURL:  phSourceURL,
+				FocusText:       phFocus,
 			}
 			if phSourceStart.Valid {
 				v := int(phSourceStart.Int64)
@@ -892,11 +899,56 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 			g.Phrases = append(g.Phrases, p)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("GetPlaylist rows: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	wordsByPhrase, err := h.focusWordTimestamps(id)
+	if err != nil {
+		log.Printf("GetPlaylist word timestamps: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	pl.Groups = make([]phraseGroupDetail, 0, len(orderedGroupIDs))
 	for _, gID := range orderedGroupIDs {
-		pl.Groups = append(pl.Groups, *groupByID[gID])
+		g := groupByID[gID]
+		for i := range g.Phrases {
+			g.Phrases[i].WordTimestamps = wordsByPhrase[g.Phrases[i].ID]
+		}
+		pl.Groups = append(pl.Groups, *g)
 	}
 	jsonOK(w, pl)
+}
+
+// focusWordTimestamps loads the word timestamps of the playlist's phrases that have a
+// focus_text, keyed by phrase id. Phrases without focus_text never need them.
+func (h *PhraseHandler) focusWordTimestamps(playlistID int) (map[int][]elevenlabs.AlignedWord, error) {
+	rows, err := h.db.Query(
+		`SELECT t.phrase_id, t.word, t.start_ms, t.end_ms
+		 FROM phrase_word_timestamps t
+		 JOIN phrases ph      ON ph.id = t.phrase_id
+		 JOIN phrase_groups g ON g.id = ph.phrase_group_id
+		 WHERE g.phrase_playlist_id = $1 AND ph.focus_text IS NOT NULL AND ph.focus_text <> ''
+		 ORDER BY t.phrase_id, t.word_index`,
+		playlistID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int][]elevenlabs.AlignedWord{}
+	for rows.Next() {
+		var phraseID int
+		var wd elevenlabs.AlignedWord
+		if err := rows.Scan(&phraseID, &wd.Word, &wd.StartMs, &wd.EndMs); err != nil {
+			return nil, err
+		}
+		out[phraseID] = append(out[phraseID], wd)
+	}
+	return out, rows.Err()
 }
 
 // hasPlaylistAccess returns true if the current user owns or has any share for the playlist.
@@ -1518,12 +1570,13 @@ func (h *PhraseHandler) GeneratePhraseAudio(w http.ResponseWriter, r *http.Reque
 	}
 
 	jsonOK(w, map[string]any{
-		"audio_url":   url,
-		"cached":      false,
-		"model":       phraseElevenModel,
-		"voice_id":    voiceID,
-		"duration_ms": durationMs,
-		"word_count":  len(res.Words),
+		"audio_url":       url,
+		"cached":          false,
+		"model":           phraseElevenModel,
+		"voice_id":        voiceID,
+		"duration_ms":     durationMs,
+		"word_count":      len(res.Words),
+		"word_timestamps": res.Words,
 	})
 }
 
