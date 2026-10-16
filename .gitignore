@@ -41,6 +41,6 @@ uploads/images/*
 .DS_Store
 Thumbs.db
 
-# Capturas del libro The Power of Now (copyright) — solo se versiona marcadas.tsv
+# Capturas del libro The Power of Now (copyright) — el listado vive en registro-desconocidas.tsv
 /power-of-now/capturas/
 /power-of-now/*.zip

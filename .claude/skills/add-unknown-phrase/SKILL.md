@@ -1,6 +1,6 @@
 ---
 name: add-unknown-phrase
-description: Agrega al phrase playlist "desconocidas" una palabra o expresión en inglés que el usuario leyó/escuchó y no conoce. Por cada expresión genera 3 frases cortas y útiles que la usan (1 en B1, 1 en B2, 1 en C1) con traducción y pronunciación, las muestra para aprobación y solo entonces las inserta. Los grupos se llaman 1, 2, 3… y tienen exactamente 50 frases; al llenarse uno, las siguientes van al siguiente. Úsalo cuando el usuario pase una palabra/frase desconocida, diga "agrega esta frase a desconocidas", o pegue expresiones con `*`. Con el argumento `power-of-now` saca las expresiones de las capturas del libro en `backend/power-of-now/` y lleva el listado de marcadas en `backend/power-of-now/marcadas.tsv` para no repetirlas.
+description: Agrega al phrase playlist "desconocidas" una palabra o expresión en inglés que el usuario leyó/escuchó y no conoce. Por cada expresión genera 3 frases cortas y útiles que la usan (1 en B1, 1 en B2, 1 en C1) con traducción y pronunciación, las muestra para aprobación y solo entonces las inserta. Los grupos se llaman 1, 2, 3… y tienen exactamente 50 frases; al llenarse uno, las siguientes van al siguiente. Úsalo cuando el usuario pase una palabra/frase desconocida, diga "agrega esta frase a desconocidas", pegue expresiones con `*`, o apunte a un archivo de texto con expresiones (p. ej. `palabras desconocidas.txt`, una por línea). Con el argumento `power-of-now` saca las expresiones de las capturas del libro en `backend/power-of-now/`. Toda expresión agregada o descartada queda en `backend/registro-desconocidas.tsv`, el registro único que evita repetirlas.
 user-invocable: true
 ---
 
@@ -11,63 +11,168 @@ Argumento recibido: `$ARGUMENTS`
 ```
 /add-unknown-phrase how to tell at a glance
 /add-unknown-phrase * how to tell at a glance * It is worth it
-/add-unknown-phrase                      → pregunta qué expresión
+/add-unknown-phrase "palabras desconocidas.txt"     → lee las expresiones del archivo
+/add-unknown-phrase "palabras desconocidas.txt" 8   → idem, tanda de 8
+/add-unknown-phrase power-of-now                    → capturas del libro (ver abajo)
+/add-unknown-phrase                                 → pregunta qué expresión
 ```
 
 Una o varias expresiones, separadas por `*`, `;` o saltos de línea. Quita viñetas
 y espacios sobrantes. Si no llega nada, pregunta cuál es la expresión.
 
+Cómo se interpreta el argumento, en este orden:
+
+1. Exactamente `power-of-now` (más un número opcional) → **modo `power-of-now`**.
+2. Apunta a un archivo que existe → **modo archivo**.
+3. Cualquier otra cosa → son las expresiones mismas.
+
+## Registro único: `registro-desconocidas.tsv`
+
+Hay **un solo archivo** para llevar la cuenta de todas las expresiones, vengan de
+donde vengan (mensaje, archivo de texto o capturas de `power-of-now`):
+`backend/registro-desconocidas.tsv`. Es lo que evita repetir una expresión por
+error. No hay ningún otro listado; no crees TSV paralelos.
+
+```
+expresion	estado	fuente	captura	contexto
+farther afield	agregada 2026-10-16	power-of-now	IMG-20261016-WA0003.jpg	placing copies of the book in spiritual bookstores farther afield
+spotlight	pendiente	power-of-now	Screenshot_20261016-143359_Kindle.png	any teaching that puts the spotlight of attention on the workings of the ego
+tenant	agregada 2026-10-17	palabras desconocidas.txt		
+```
+
+- `expresion`: forma base en minúsculas, sin puntuación (`nun`, no `nuns,`;
+  `to give birth to`, no `gave birth to it`). Es la clave de la deduplicación.
+- `estado`:
+  - `pendiente`: detectada pero aún sin frases. Solo la usa `power-of-now`, porque
+    leer las capturas es caro y no conviene repetirlo.
+  - `agregada AAAA-MM-DD`: sus 3 frases ya están en la base.
+  - `descartada AAAA-MM-DD`: el usuario la rechazó.
+- `fuente`: `mensaje`, `power-of-now` o el nombre del archivo de donde salió.
+- `captura`: solo en `power-of-now`, la imagen donde aparece. Vacío en el resto.
+- `contexto`: opcional; la oración original si se conoce.
+
+Las columnas van separadas por tabuladores reales; las vacías se dejan vacías (no
+se omiten). Siempre 5 columnas.
+
+**Antes de proponer frases** (en cualquier modo), comprueba cada expresión contra
+el registro:
+
+```bash
+awk -F'\t' -v e="<expresion en minúsculas>" 'NR>1 && tolower($1)==e' registro-desconocidas.tsv
+```
+
+(no uses `grep -P`: falla en el Git Bash de Windows). La comparación es literal,
+así que además fíjate a ojo en variantes de la misma expresión (`hand over` /
+`handed over`, `worth it` / `it is worth it`) mirando el registro entero.
+
+| Si ya está como… | Qué hacer |
+|---|---|
+| `agregada` | sácala de la tanda y dilo en la respuesta |
+| `descartada` | pregunta si ahora sí la quiere |
+| `pendiente` | es la misma fila: úsala, no añadas otra |
+
+El paso 2 (duplicados en la base) sigue haciéndose: cubre lo que se insertó sin
+pasar por el registro.
+
+**Después de insertar** (paso 6 verificado):
+
+- Las filas que ya existían (`pendiente`) cambian de estado en su sitio a
+  `agregada <hoy>` o `descartada <hoy>`.
+- Las expresiones nuevas (mensaje o archivo) se añaden al final, una fila por
+  expresión: `agregada <hoy>` las insertadas y `descartada <hoy>` las que el
+  usuario rechazó en la tabla de aprobación.
+- Si la inserción falló, no escribas nada.
+
+```bash
+# añadir una fila nueva (5 columnas, \n como fin de línea)
+printf '%s\t%s\t%s\t%s\t%s\n' "tenant" "agregada 2026-10-17" "palabras desconocidas.txt" "" "" >> registro-desconocidas.tsv
+
+# cambiar de estado filas pendientes
+awk -F'\t' -v OFS='\t' -v hoy="2026-10-17" '
+  BEGIN { split("relative|meaningless", a, "|"); for (i in a) s[a[i]] }
+  NR>1 && ($1 in s) && $2=="pendiente" { $2 = "agregada " hoy } { print }
+' registro-desconocidas.tsv > registro.tmp && mv registro.tmp registro-desconocidas.tsv
+```
+
+## Modo archivo
+
+```
+/add-unknown-phrase "palabras desconocidas.txt"
+/add-unknown-phrase "palabras desconocidas.txt" 8
+```
+
+Si el argumento (sin comillas y sin un número final opcional) es la ruta de un
+archivo que existe, las expresiones salen de ese archivo. La ruta se resuelve
+desde `backend/` o como absoluta; si no existe tal cual, prueba añadiéndole
+`.txt` (`palabras desconocidas` → `palabras desconocidas.txt`). Si el argumento
+parece un nombre de archivo pero no existe, **pregunta** en vez de tomarlo como
+expresión.
+
+Formato del archivo, el que el usuario escribe a mano:
+
+- Una expresión por línea; también vale separar con `*` o `;`.
+- Se ignoran líneas vacías y las que empiezan por `#`.
+- Quita `\r` (el archivo suele venir con saltos CRLF de Windows), viñetas
+  (`-`, `*`, `•`, `1.`) y espacios sobrantes.
+- Si una línea trae contexto tras ` | ` (`tenant | the tenant didn't pay`), lo de
+  la izquierda es la expresión y lo de la derecha va a la columna `contexto` del
+  registro.
+
+Leerlo sin que el CRLF ensucie la última palabra:
+
+```bash
+tr -d '\r' < "palabras desconocidas.txt" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^#' | grep -v '^$'
+```
+
+Pasos:
+
+1. **Pendientes** = las expresiones del archivo, en su orden, que **no** están en
+   el registro (ni como `agregada` ni como `descartada`).
+2. **Tanda**: hasta **5** pendientes; un número tras el nombre del archivo cambia
+   el tamaño. Sigue con el procedimiento normal (pasos 1–7).
+3. **El archivo del usuario no se toca**: no borres ni marques líneas. Lo que ya
+   se procesó lo sabe el registro.
+4. En el reporte final di cuántas expresiones del archivo siguen sin registrar.
+
 ## Modo `power-of-now`
 
 ```
 /add-unknown-phrase power-of-now
+/add-unknown-phrase power-of-now 8
 ```
 
-Si el argumento es exactamente `power-of-now`, las expresiones no vienen en el
-mensaje: salen de las capturas del libro *The Power of Now* que el usuario dejó en
-`backend/power-of-now/`. El playlist sigue
-siendo `desconocidas`; solo cambia de dónde salen las expresiones.
+Si el argumento es `power-of-now`, las expresiones salen de las capturas del libro
+*The Power of Now* que el usuario dejó en `backend/power-of-now/`. El playlist sigue
+siendo `desconocidas` y el listado es el mismo registro único, con
+`fuente = power-of-now`.
 
 | Qué | Dónde |
 |---|---|
 | Zips de Google Drive | `power-of-now/*.zip` |
 | Capturas | `power-of-now/capturas/` (`.png`, `.jpg`) |
-| Listado de expresiones marcadas | `power-of-now/marcadas.tsv` |
+| Expresiones marcadas | `registro-desconocidas.tsv`, filas con `fuente = power-of-now` |
 
-`marcadas.tsv` está separado por tabuladores, con una fila por expresión **marcada
-en el libro** (no por frase generada):
+Zips y capturas están en `.gitignore` (copyright del libro); el registro sí se sube
+a GitHub.
 
-```
-expresion	estado	captura	contexto
-farther afield	pendiente	IMG-20261016-WA0003.jpg	placing copies of the book in spiritual bookstores farther afield
-```
-
-- `expresion`: forma base en minúsculas (`nun`, no `nuns,`; `to give birth to`,
-  no `to give birth to it`); sin puntuación del libro.
-- `estado`: `pendiente`, `agregada AAAA-MM-DD` o `descartada`.
-- `captura`: nombre del archivo donde aparece.
-- `contexto`: la oración del libro, recortada, para entender el sentido.
-
-Pasos previos (sustituyen al argumento):
+Pasos previos:
 
 1. **Extraer zips nuevos** sin sobrescribir:
-   `unzip -n -q <zip> -d power-of-now/capturas`. No borres los zips. Zips y capturas están en `.gitignore` (copyright del libro); solo `marcadas.tsv` se sube a GitHub.
+   `unzip -n -q <zip> -d power-of-now/capturas`. No borres los zips.
 2. **Capturas nuevas** = las de `capturas/` cuyo nombre no aparece en la columna
-   `captura` del TSV. Ábrelas con Read en orden de lectura (posición/porcentaje
+   `captura` del registro. Ábrelas con Read en orden de lectura (posición/porcentaje
    del pie de página) y saca los fragmentos resaltados (azul o amarillo). Un
    resaltado que corta una frase a la mitad (`handed over had`) se reduce a la
    expresión que tiene sentido (`handed over`).
-3. **Deduplicar** cada expresión contra el TSV antes de agregarla:
-   `awk -F'\t' 'tolower($1)=="<expresion>"' power-of-now/marcadas.tsv` (no uses
-   `grep -P`: falla en el Git Bash de Windows). Si ya está, no se repite. Las nuevas se añaden al final con estado `pendiente`.
-4. **Tanda**: toma hasta **5** expresiones `pendiente`, en el orden del archivo, y
-   sigue con el procedimiento normal (pasos 1–7). Si el usuario pasa un número
-   (`power-of-now 8`), usa ese tamaño de tanda. Cuando la expresión del libro es
-   ambigua o probablemente se resaltó por error (p. ej. una palabra muy básica),
-   pregúntalo en la tabla de aprobación.
-5. **Tras insertar** (paso 6 verificado), cambia el estado de esas filas a
-   `agregada AAAA-MM-DD`. Las que el usuario rechace quedan `descartada`. No
-   marques nada si la inserción falló.
+3. **Deduplicar** cada expresión contra el registro entero (cualquier fuente). Si
+   ya está, no se añade. Las nuevas van al final como
+   `<expresion>	pendiente	power-of-now	<captura>	<contexto>`.
+4. **Tanda**: hasta **5** filas `pendiente` con `fuente = power-of-now`, en el
+   orden del archivo; un número tras `power-of-now` cambia el tamaño. Sigue con el
+   procedimiento normal (pasos 1–7). Cuando la expresión del libro es ambigua o
+   probablemente se resaltó por error (p. ej. una palabra muy básica), pregúntalo
+   en la tabla de aprobación.
+5. **Tras insertar**, cambia el estado de esas filas como dice el registro único.
 6. En el reporte final di cuántas siguen `pendiente`.
 
 ## Datos fijos
@@ -268,7 +373,9 @@ Si algo no cuadra, dilo antes de seguir.
 ### 7. Reportar
 
 Base de datos usada, cuántas frases entraron y en qué grupo(s), ids, y el enlace
-`/phrases/<playlist_id>`.
+`/phrases/<playlist_id>`. Confirma qué filas añadiste a `registro-desconocidas.tsv`
+y, si las expresiones salieron de un archivo o de `power-of-now`, cuántas quedan
+pendientes allí.
 
 ## Lo que este skill no hace
 
