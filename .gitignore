@@ -40,3 +40,7 @@ uploads/images/*
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Capturas del libro The Power of Now (copyright) — solo se versiona marcadas.tsv
+/power-of-now/capturas/
+/power-of-now/*.zip
