@@ -1,6 +1,6 @@
 ---
 name: add-unknown-phrase
-description: Agrega al phrase playlist "desconocidas" una palabra o expresión en inglés que el usuario leyó/escuchó y no conoce. Por cada expresión genera 3 frases cortas y útiles que la usan (1 en B1, 1 en B2, 1 en C1) con traducción y pronunciación, las muestra para aprobación y solo entonces las inserta. Los grupos se llaman 1, 2, 3… y tienen exactamente 50 frases; al llenarse uno, las siguientes van al siguiente. Úsalo cuando el usuario pase una palabra/frase desconocida, diga "agrega esta frase a desconocidas", pegue expresiones con `*`, o apunte a un archivo de texto con expresiones (p. ej. `palabras desconocidas.txt`, una por línea). Con el argumento `power-of-now` saca las expresiones de las capturas del libro en `backend/power-of-now/`. Toda expresión agregada o descartada queda en `backend/registro-desconocidas.tsv`, el registro único que evita repetirlas.
+description: Agrega al phrase playlist "desconocidas" una palabra o expresión en inglés que el usuario leyó/escuchó y no conoce. Por cada expresión genera 3 frases cortas y útiles que la usan (1 en B1, 1 en B2, 1 en C1) con traducción y pronunciación, las muestra para aprobación y solo entonces las inserta. Los grupos se llaman 1, 2, 3… y tienen exactamente 50 frases; al llenarse uno, las siguientes van al siguiente. Úsalo cuando el usuario pase una palabra/frase desconocida, diga "agrega esta frase a desconocidas", pegue expresiones con `*`, o apunte a un archivo de texto con expresiones (p. ej. `palabras-desconocidas.txt`, una por línea). Con el argumento `power-of-now` saca las expresiones de las capturas del libro en `backend/power-of-now/`. Toda expresión agregada o descartada queda en `backend/registro-desconocidas.tsv`, el registro único que evita repetirlas.
 user-invocable: true
 ---
 
@@ -11,10 +11,10 @@ Argumento recibido: `$ARGUMENTS`
 ```
 /add-unknown-phrase how to tell at a glance
 /add-unknown-phrase * how to tell at a glance * It is worth it
-/add-unknown-phrase "palabras desconocidas.txt"     → lee las expresiones del archivo
-/add-unknown-phrase "palabras desconocidas.txt" 8   → idem, tanda de 8
-/add-unknown-phrase power-of-now                    → capturas del libro (ver abajo)
-/add-unknown-phrase                                 → pregunta qué expresión
+/add-unknown-phrase palabras-desconocidas.txt    → lee las expresiones del archivo
+/add-unknown-phrase palabras-desconocidas.txt 8  → idem, tanda de 8
+/add-unknown-phrase power-of-now                 → capturas del libro (ver abajo)
+/add-unknown-phrase                              → pregunta qué expresión
 ```
 
 Una o varias expresiones, separadas por `*`, `;` o saltos de línea. Quita viñetas
@@ -37,7 +37,7 @@ error. No hay ningún otro listado; no crees TSV paralelos.
 expresion	estado	fuente	captura	contexto
 farther afield	agregada 2026-10-16	power-of-now	IMG-20261016-WA0003.jpg	placing copies of the book in spiritual bookstores farther afield
 spotlight	pendiente	power-of-now	Screenshot_20261016-143359_Kindle.png	any teaching that puts the spotlight of attention on the workings of the ego
-tenant	agregada 2026-10-17	palabras desconocidas.txt		
+tenant	agregada 2026-10-17	palabras-desconocidas.txt		
 ```
 
 - `expresion`: forma base en minúsculas, sin puntuación (`nun`, no `nuns,`;
@@ -58,10 +58,14 @@ se omiten). Siempre 5 columnas.
 el registro:
 
 ```bash
-awk -F'\t' -v e="<expresion en minúsculas>" 'NR>1 && tolower($1)==e' registro-desconocidas.tsv
+awk -F'\t' -v e="<expresion en minúsculas>" 'NR>1 && tolower($(1))==e' registro-desconocidas.tsv
 ```
 
-(no uses `grep -P`: falla en el Git Bash de Windows). La comparación es literal,
+(no uses `grep -P`: falla en el Git Bash de Windows). En `awk` escribe los campos
+como `$(1)`, `$(2)`, nunca con el dólar pegado al número: al cargar el skill esa
+forma se sustituye por las palabras del argumento y el comando llega roto. Si
+editas este archivo, mantén esa forma (tampoco la escribas en el texto
+explicativo). La comparación es literal,
 así que además fíjate a ojo en variantes de la misma expresión (`hand over` /
 `handed over`, `worth it` / `it is worth it`) mirando el registro entero.
 
@@ -85,26 +89,26 @@ pasar por el registro.
 
 ```bash
 # añadir una fila nueva (5 columnas, \n como fin de línea)
-printf '%s\t%s\t%s\t%s\t%s\n' "tenant" "agregada 2026-10-17" "palabras desconocidas.txt" "" "" >> registro-desconocidas.tsv
+printf '%s\t%s\t%s\t%s\t%s\n' "tenant" "agregada 2026-10-17" palabras-desconocidas.txt "" "" >> registro-desconocidas.tsv
 
 # cambiar de estado filas pendientes
 awk -F'\t' -v OFS='\t' -v hoy="2026-10-17" '
   BEGIN { split("relative|meaningless", a, "|"); for (i in a) s[a[i]] }
-  NR>1 && ($1 in s) && $2=="pendiente" { $2 = "agregada " hoy } { print }
+  NR>1 && ($(1) in s) && $(2)=="pendiente" { $(2) = "agregada " hoy } { print }
 ' registro-desconocidas.tsv > registro.tmp && mv registro.tmp registro-desconocidas.tsv
 ```
 
 ## Modo archivo
 
 ```
-/add-unknown-phrase "palabras desconocidas.txt"
-/add-unknown-phrase "palabras desconocidas.txt" 8
+/add-unknown-phrase palabras-desconocidas.txt
+/add-unknown-phrase palabras-desconocidas.txt 8
 ```
 
 Si el argumento (sin comillas y sin un número final opcional) es la ruta de un
 archivo que existe, las expresiones salen de ese archivo. La ruta se resuelve
 desde `backend/` o como absoluta; si no existe tal cual, prueba añadiéndole
-`.txt` (`palabras desconocidas` → `palabras desconocidas.txt`). Si el argumento
+`.txt` (`palabras-desconocidas` → `palabras-desconocidas.txt`). Si el argumento
 parece un nombre de archivo pero no existe, **pregunta** en vez de tomarlo como
 expresión.
 
@@ -117,22 +121,46 @@ Formato del archivo, el que el usuario escribe a mano:
 - Si una línea trae contexto tras ` | ` (`tenant | the tenant didn't pay`), lo de
   la izquierda es la expresión y lo de la derecha va a la columna `contexto` del
   registro.
+- Las líneas que empiezan por `listo - ` o `descartada - ` ya están procesadas:
+  las marca este skill (ver paso 4) y se saltan.
 
-Leerlo sin que el CRLF ensucie la última palabra:
+```
+listo - tenant
+listo - haven't accounted for
+descartada - nun
+spotlight
+```
+
+Leer solo las pendientes, sin que el CRLF ensucie la última palabra:
 
 ```bash
-tr -d '\r' < "palabras desconocidas.txt" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^#' | grep -v '^$'
+tr -d '\r' < palabras-desconocidas.txt | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^#' | grep -v '^$' | grep -viE '^(listo|descartada) - '
 ```
 
 Pasos:
 
-1. **Pendientes** = las expresiones del archivo, en su orden, que **no** están en
-   el registro (ni como `agregada` ni como `descartada`).
+1. **Pendientes** = las líneas sin marca, en su orden, que **no** están en el
+   registro. Si una línea sin marca ya figura en el registro (agregada o
+   descartada por otra vía), no la propongas: márcala como en el paso 4 y dilo.
 2. **Tanda**: hasta **5** pendientes; un número tras el nombre del archivo cambia
    el tamaño. Sigue con el procedimiento normal (pasos 1–7).
-3. **El archivo del usuario no se toca**: no borres ni marques líneas. Lo que ya
-   se procesó lo sabe el registro.
-4. En el reporte final di cuántas expresiones del archivo siguen sin registrar.
+3. **Registro**: en este modo la columna `expresion` lleva la línea **tal como está
+   en el archivo** (en minúsculas, sin la marca), aunque no sea la forma base
+   (`haven't accounted for`, no `to account for`), para que las dos cosas
+   coincidan.
+4. **Marcar el archivo** tras insertar (paso 6 verificado) y anotar el registro:
+   antepón `listo - ` a cada línea insertada y `descartada - ` a cada una que el
+   usuario rechazó. Solo cambia esas líneas: no reordenes, no borres y no toques
+   el resto del texto. Si la inserción falló, no marques nada.
+
+   ```bash
+   sed -i -E "s/^([[:space:]]*)(tenant|haven't accounted for)([[:space:]]*)$/listo - \\2/" palabras-desconocidas.txt
+   ```
+
+   La expresión va tal cual en el patrón; si lleva caracteres especiales de regex
+   (`.`, `(`, `?`, `*`, `/`…), escápalos. Después vuelve a leer el archivo y
+   comprueba que esas líneas, y solo esas, quedaron marcadas.
+5. En el reporte final di cuántas líneas del archivo siguen sin marcar.
 
 ## Modo `power-of-now`
 
