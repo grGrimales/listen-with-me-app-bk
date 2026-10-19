@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Max results returned per kind (phrases / story paragraphs). One extra row is
@@ -33,14 +35,41 @@ func foldSQL(expr string) string {
 	return fmt.Sprintf("translate(lower(%s), '%s', '%s')", expr, foldFrom, foldTo)
 }
 
-// searchTokens splits the query into folded words, escaped for use inside LIKE.
-func searchTokens(q string) []string {
-	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	var out []string
+// searchToken is one folded query word. A leading space in the query anchors the
+// first word to a word start (" se" → "second", not "close"); a trailing space
+// anchors the last word to a word end ("se " → "close", not "closet").
+type searchToken struct {
+	word       string
+	start, end bool
+}
+
+func searchTokens(q string) []searchToken {
+	var out []searchToken
 	for _, f := range strings.Fields(foldReplacer.Replace(strings.ToLower(q))) {
-		out = append(out, "%"+esc.Replace(f)+"%")
+		out = append(out, searchToken{word: f})
+	}
+	if len(out) > 0 {
+		out[0].start = strings.TrimLeftFunc(q, unicode.IsSpace) != q
+		out[len(out)-1].end = strings.TrimRightFunc(q, unicode.IsSpace) != q
 	}
 	return out
+}
+
+// condition returns the SQL test of the token against haystack and its argument:
+// a plain LIKE, or a regex when the word has to sit at a word boundary.
+func (t searchToken) condition(haystack string, arg int) (string, any) {
+	if !t.start && !t.end {
+		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+		return fmt.Sprintf("%s LIKE $%d", haystack, arg), "%" + esc.Replace(t.word) + "%"
+	}
+	re := regexp.QuoteMeta(t.word)
+	if t.start {
+		re = `(^|[^[:alnum:]])` + re
+	}
+	if t.end {
+		re += `([^[:alnum:]]|$)`
+	}
+	return fmt.Sprintf("%s ~ $%d", haystack, arg), re
 }
 
 // parseIDList reads a CSV of ids. A missing param means "all"; a present but
@@ -182,7 +211,7 @@ type searchParagraphHit struct {
 
 // GET /api/search?q=...&phrase_playlists=1,2&story_playlists=3
 // Every query word must appear (accent/case-insensitive) in the text or its Spanish
-// translation. Omitted playlist params = search all the user can read.
+// translation; leading/trailing spaces anchor the first/last word (see searchToken). Omitted playlist params = search all the user can read.
 func (h *PhraseHandler) Search(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.userIDFromContext(r)
 	if err != nil {
@@ -205,13 +234,14 @@ func (h *PhraseHandler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// tokenWhere ANDs one LIKE per word against the folded haystack; args start at $first.
+	// tokenWhere ANDs one test per word against the folded haystack; args start at $first.
 	tokenWhere := func(haystack string, first int) (string, []any) {
 		var sb strings.Builder
 		args := make([]any, 0, len(tokens))
 		for i, t := range tokens {
-			fmt.Fprintf(&sb, " AND %s LIKE $%d", foldSQL(haystack), first+i)
-			args = append(args, t)
+			cond, arg := t.condition(foldSQL(haystack), first+i)
+			sb.WriteString(" AND " + cond)
+			args = append(args, arg)
 		}
 		return sb.String(), args
 	}
