@@ -1,2 +1,3 @@
 listo - tenant
 listo - haven't accounted for
+bearing
