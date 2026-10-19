@@ -228,6 +228,8 @@ func Setup() http.Handler {
 		mux.Handle("POST /api/phrases/{id}/audio/polly", middleware.Auth(http.HandlerFunc(phraseH.GeneratePollyAudio)))
 		mux.Handle("GET /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.GetPhraseVocabularyInfo)))
 		mux.Handle("POST /api/phrase-playlists/{id}/vocabulary", middleware.Auth(http.HandlerFunc(phraseH.AddPhraseVocabulary)))
+		mux.Handle("GET /api/search/sources", middleware.Auth(http.HandlerFunc(phraseH.SearchSources)))
+		mux.Handle("GET /api/search", middleware.Auth(http.HandlerFunc(phraseH.Search)))
 		mux.Handle("GET /api/phrase-stats/leaderboard", middleware.Auth(http.HandlerFunc(phraseH.Leaderboard)))
 		mux.Handle("GET /api/phrase-stats/me", middleware.Auth(http.HandlerFunc(phraseH.MyStats)))
 		mux.Handle("GET /api/phrase-stats/me/detailed", middleware.Auth(http.HandlerFunc(phraseH.MyStatsDetailed)))
