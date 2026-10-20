@@ -405,6 +405,10 @@ Base de datos usada, cuántas frases entraron y en qué grupo(s), ids, y el enla
 y, si las expresiones salieron de un archivo o de `power-of-now`, cuántas quedan
 pendientes allí.
 
+Las expresiones nuevas todavía no están en el vocabulario (`📗 Vocab · desconocidas`);
+sugiere correr `/actualizar-playlist-vocabulario` con ese playlist para pasarlas y
+completar su ficha.
+
 ## Lo que este skill no hace
 
 - **No genera audio.** `polly_audio_url_female` queda en `NULL`; la app genera el

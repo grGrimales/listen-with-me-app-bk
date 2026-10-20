@@ -595,7 +595,7 @@ type phrasePlaylistSummary struct {
 }
 
 // phraseItem.FocusText is the expression the phrase teaches, as written in Text.
-// WordTimestamps (only sent when FocusText is set) let the card play just that part.
+// WordTimestamps let the card play just one part of the audio (the focus or a saved word).
 type phraseItem struct {
 	ID              int                      `json:"id"`
 	Text            string                   `json:"text"`
@@ -611,6 +611,8 @@ type phraseItem struct {
 	SourceStartMs   *int                     `json:"source_start_ms"`
 	SourceEndMs     *int                     `json:"source_end_ms"`
 	FocusText       string                   `json:"focus_text"`
+	VocabNotes      string                   `json:"vocab_notes"`
+	VocabSourceText string                   `json:"vocab_source_text"`
 	WordTimestamps  []elevenlabs.AlignedWord `json:"word_timestamps,omitempty"`
 	SRS             *phraseSRS               `json:"srs"`
 }
@@ -798,13 +800,14 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		        COALESCE(ph.polly_audio_url_female, ''),
 		        COALESCE(ph.polly_audio_url_male, ''),
 		        COALESCE(ph.source_audio_url, ''), ph.source_start_ms, ph.source_end_ms,
-		        COALESCE(ph.focus_text, ''),
+		        COALESCE(ph.focus_text, ''), COALESCE(ph.vocab_notes, ''), COALESCE(vsrc.text, ''),
 		        COALESCE(rc.review_count, 0) AS review_count,
 		        COALESCE(zc.zen_count, 0) AS zen_count,
 		        srs.ease_factor, srs.interval_days, srs.repetitions, srs.lapses,
 		        srs.last_reviewed_at, srs.next_review_at
 		 FROM phrase_groups g
 		 LEFT JOIN phrases ph ON ph.phrase_group_id = g.id
+		 LEFT JOIN phrases vsrc ON vsrc.id = ph.vocab_source_phrase_id
 		 LEFT JOIN (
 		     SELECT phrase_id, COUNT(*) AS review_count
 		     FROM phrase_reviews WHERE user_id = $2
@@ -838,14 +841,14 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		var phCreated sql.NullTime
 		var phPollyURLF, phPollyURLM, phSourceURL string
 		var phSourceStart, phSourceEnd sql.NullInt64
-		var phFocus string
+		var phFocus, phNotes, phVocabSrc string
 		var reviewCount, zenCount int
 		var srsEF, srsInterval sql.NullFloat64
 		var srsReps, srsLapses sql.NullInt64
 		var srsLast, srsNext sql.NullTime
 		if err := rows.Scan(&gID, &gName, &gPos, &phID, &phText, &phTr, &phPron, &phPos, &phCreated,
 			&phPollyURLF, &phPollyURLM,
-			&phSourceURL, &phSourceStart, &phSourceEnd, &phFocus,
+			&phSourceURL, &phSourceStart, &phSourceEnd, &phFocus, &phNotes, &phVocabSrc,
 			&reviewCount, &zenCount, &srsEF, &srsInterval, &srsReps, &srsLapses, &srsLast, &srsNext); err != nil {
 			log.Printf("GetPlaylist scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -870,6 +873,8 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 				PollyAudioURLM:  phPollyURLM,
 				SourceAudioURL:  phSourceURL,
 				FocusText:       phFocus,
+				VocabNotes:      phNotes,
+				VocabSourceText: phVocabSrc,
 			}
 			if phSourceStart.Valid {
 				v := int(phSourceStart.Int64)
@@ -905,7 +910,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wordsByPhrase, err := h.focusWordTimestamps(id)
+	wordsByPhrase, err := h.playlistWordTimestamps(id)
 	if err != nil {
 		log.Printf("GetPlaylist word timestamps: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -923,15 +928,15 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, pl)
 }
 
-// focusWordTimestamps loads the word timestamps of the playlist's phrases that have a
-// focus_text, keyed by phrase id. Phrases without focus_text never need them.
-func (h *PhraseHandler) focusWordTimestamps(playlistID int) (map[int][]elevenlabs.AlignedWord, error) {
+// playlistWordTimestamps loads the word timestamps of the playlist's phrases, keyed by
+// phrase id, so the card can play a single expression or saved word out of the phrase audio.
+func (h *PhraseHandler) playlistWordTimestamps(playlistID int) (map[int][]elevenlabs.AlignedWord, error) {
 	rows, err := h.db.Query(
 		`SELECT t.phrase_id, t.word, t.start_ms, t.end_ms
 		 FROM phrase_word_timestamps t
 		 JOIN phrases ph      ON ph.id = t.phrase_id
 		 JOIN phrase_groups g ON g.id = ph.phrase_group_id
-		 WHERE g.phrase_playlist_id = $1 AND ph.focus_text IS NOT NULL AND ph.focus_text <> ''
+		 WHERE g.phrase_playlist_id = $1
 		 ORDER BY t.phrase_id, t.word_index`,
 		playlistID,
 	)
@@ -968,6 +973,7 @@ type vocabWordItem struct {
 	Text            string `json:"text"`
 	PollyAudioURLF  string `json:"polly_audio_url_female"`
 	PollyAudioURLM  string `json:"polly_audio_url_male"`
+	SourcePhraseID  *int   `json:"source_phrase_id"`
 }
 
 // GET /api/phrase-playlists/{id}/vocabulary
@@ -1009,7 +1015,8 @@ func (h *PhraseHandler) GetPhraseVocabularyInfo(w http.ResponseWriter, r *http.R
 		rows, err := h.db.Query(
 			`SELECT ph.id, ph.text,
 			        COALESCE(ph.polly_audio_url_female, ''),
-			        COALESCE(ph.polly_audio_url_male, '')
+			        COALESCE(ph.polly_audio_url_male, ''),
+			        ph.vocab_source_phrase_id
 			 FROM phrases ph
 			 JOIN phrase_groups g ON g.id = ph.phrase_group_id
 			 WHERE g.phrase_playlist_id = $1
@@ -1023,10 +1030,15 @@ func (h *PhraseHandler) GetPhraseVocabularyInfo(w http.ResponseWriter, r *http.R
 		defer rows.Close()
 		for rows.Next() {
 			var item vocabWordItem
-			if err := rows.Scan(&item.ID, &item.Text, &item.PollyAudioURLF, &item.PollyAudioURLM); err != nil {
+			var src sql.NullInt64
+			if err := rows.Scan(&item.ID, &item.Text, &item.PollyAudioURLF, &item.PollyAudioURLM, &src); err != nil {
 				log.Printf("GetPhraseVocabularyInfo scan: %v", err)
 				jsonError(w, "internal error", http.StatusInternalServerError)
 				return
+			}
+			if src.Valid {
+				v := int(src.Int64)
+				item.SourcePhraseID = &v
 			}
 			words = append(words, item)
 		}
@@ -1041,7 +1053,9 @@ func (h *PhraseHandler) GetPhraseVocabularyInfo(w http.ResponseWriter, r *http.R
 
 // POST /api/phrase-playlists/{id}/vocabulary  body: {text, source_phrase_id?}
 // Ensures a vocab child playlist exists for (user, parent), inserts the word as a phrase
-// inside a default "Words" group. Dedup by lower(text). Returns child playlist id + phrase id.
+// inside a default "Words" group. Dedup by (lower(text), source phrase): the same word saved
+// from another phrase is a new row, since it may mean something else there and gets its own
+// reviews. Returns child playlist id + phrase id.
 func (h *PhraseHandler) AddPhraseVocabulary(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.userIDFromContext(r)
 	if err != nil {
@@ -1145,11 +1159,26 @@ func (h *PhraseHandler) AddPhraseVocabulary(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// 3. Dedup by lower(text) inside this group
+	// 3. Keep the source phrase only if it belongs to the parent playlist.
+	var sourceID sql.NullInt64
+	if body.SourcePhraseID != nil {
+		if err := tx.QueryRow(
+			`SELECT ph.id FROM phrases ph JOIN phrase_groups g ON g.id = ph.phrase_group_id
+			 WHERE ph.id = $1 AND g.phrase_playlist_id = $2`,
+			*body.SourcePhraseID, parentID,
+		).Scan(&sourceID); err != nil && err != sql.ErrNoRows {
+			log.Printf("AddPhraseVocabulary source phrase: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 4. Dedup by lower(text) + source phrase inside this group
 	var existing sql.NullInt64
 	if err := tx.QueryRow(
-		`SELECT id FROM phrases WHERE phrase_group_id = $1 AND lower(text) = lower($2) LIMIT 1`,
-		groupID, body.Text,
+		`SELECT id FROM phrases WHERE phrase_group_id = $1 AND lower(text) = lower($2)
+		   AND vocab_source_phrase_id IS NOT DISTINCT FROM $3 LIMIT 1`,
+		groupID, body.Text, sourceID,
 	).Scan(&existing); err != nil && err != sql.ErrNoRows {
 		log.Printf("AddPhraseVocabulary dedup: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1170,9 +1199,9 @@ func (h *PhraseHandler) AddPhraseVocabulary(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if err := tx.QueryRow(
-			`INSERT INTO phrases (phrase_group_id, text, translation_es, pronunciation_es, position)
-			 VALUES ($1, $2, '', '', $3) RETURNING id`,
-			groupID, body.Text, pos,
+			`INSERT INTO phrases (phrase_group_id, text, translation_es, pronunciation_es, position, vocab_source_phrase_id)
+			 VALUES ($1, $2, '', '', $3, $4) RETURNING id`,
+			groupID, body.Text, pos, sourceID,
 		).Scan(&phraseID); err != nil {
 			log.Printf("AddPhraseVocabulary insert phrase: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
