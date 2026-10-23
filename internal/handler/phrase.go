@@ -592,6 +592,8 @@ type phrasePlaylistSummary struct {
 	GroupCount  int    `json:"group_count"`
 	PhraseCount int    `json:"phrase_count"`
 	CreatedAt   string `json:"created_at"`
+	// Set only on vocab child playlists ("📗 Vocab · …"), returned with ?include_vocab=1.
+	ParentPlaylistID *int `json:"parent_playlist_id,omitempty"`
 }
 
 // phraseItem.FocusText is the expression the phrase teaches, as written in Text.
@@ -661,7 +663,8 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 		       CASE WHEN p.user_id = $1 THEN 'owner' ELSE COALESCE(s.permission, '') END AS role,
 		       p.created_at,
 		       COUNT(DISTINCT g.id) AS group_count,
-		       COUNT(ph.id)         AS phrase_count
+		       COUNT(ph.id)         AS phrase_count,
+		       p.parent_playlist_id
 		FROM phrase_playlists p
 		LEFT JOIN phrase_groups g ON g.phrase_playlist_id = p.id
 		LEFT JOIN phrases ph      ON ph.phrase_group_id  = g.id
@@ -672,7 +675,11 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 		q += ` AND p.language = $2`
 		args = append(args, lang)
 	}
-	q += ` AND p.parent_playlist_id IS NULL AND p.story_playlist_id IS NULL GROUP BY p.id, s.permission ORDER BY is_favorite DESC, p.created_at DESC`
+	// Vocab child playlists stay hidden unless asked for (the Zen picker lists them apart).
+	if r.URL.Query().Get("include_vocab") != "1" {
+		q += ` AND p.parent_playlist_id IS NULL`
+	}
+	q += ` AND p.story_playlist_id IS NULL GROUP BY p.id, s.permission ORDER BY is_favorite DESC, p.created_at DESC`
 
 	rows, err := h.db.Query(q, args...)
 	if err != nil {
@@ -685,10 +692,15 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 	items := []phrasePlaylistSummary{}
 	for rows.Next() {
 		var s phrasePlaylistSummary
-		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &s.Language, &s.IsFavorite, &s.Role, &s.CreatedAt, &s.GroupCount, &s.PhraseCount); err != nil {
+		var parentID sql.NullInt64
+		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &s.Language, &s.IsFavorite, &s.Role, &s.CreatedAt, &s.GroupCount, &s.PhraseCount, &parentID); err != nil {
 			log.Printf("ListPlaylists scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if parentID.Valid {
+			v := int(parentID.Int64)
+			s.ParentPlaylistID = &v
 		}
 		items = append(items, s)
 	}
