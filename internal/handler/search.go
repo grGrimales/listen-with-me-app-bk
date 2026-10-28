@@ -130,7 +130,7 @@ func (h *PhraseHandler) SearchSources(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN phrase_playlist_shares s ON s.playlist_id = p.id AND s.user_id = $1
 		LEFT JOIN phrase_groups g ON g.phrase_playlist_id = p.id
 		LEFT JOIN phrases ph ON ph.phrase_group_id = g.id
-		WHERE p.user_id = $1 OR s.user_id = $1
+		WHERE `+visibleTo(r, "p", "s")+`
 		GROUP BY p.id
 		ORDER BY is_favorite DESC, kind, p.created_at DESC`, userID)
 	if err != nil {
@@ -266,7 +266,7 @@ func (h *PhraseHandler) Search(w http.ResponseWriter, r *http.Request) {
 			    GROUP BY phrase_id
 			) rc ON rc.phrase_id = ph.id
 			LEFT JOIN user_phrase_srs srs ON srs.phrase_id = ph.id AND srs.user_id = $1
-			WHERE (pp.user_id = $1 OR s.user_id = $1) AND ($2 OR pp.id = ANY($3))` + cond + `
+			WHERE `+visibleTo(r, "pp", "s")+` AND ($2 OR pp.id = ANY($3))` + cond + `
 			ORDER BY pp.id, g.position, g.id, ph.position, ph.id
 			LIMIT ` + strconv.Itoa(searchResultLimit+1)
 		args := append([]any{userID, allPhrase, phraseIDs}, tArgs...)

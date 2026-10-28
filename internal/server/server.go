@@ -202,6 +202,8 @@ func Setup() http.Handler {
 
 		// User preferences
 		mux.Handle("PUT /api/user/language", middleware.Auth(http.HandlerFunc(userH.UpdateLanguage)))
+		mux.Handle("GET /api/admin/users", admin(http.HandlerFunc(userH.AdminListUsers)))
+		mux.Handle("PUT /api/admin/users/{id}/shared-role", admin(http.HandlerFunc(userH.AdminSetSharedRole)))
 
 		// Phrase playlists
 		mux.Handle("POST /api/phrase-playlists/import", middleware.Auth(http.HandlerFunc(phraseH.Import)))
@@ -209,6 +211,7 @@ func Setup() http.Handler {
 		mux.Handle("GET /api/story-phrase-playlists", middleware.Auth(http.HandlerFunc(phraseH.ListStoryPhrasePlaylists)))
 		mux.Handle("GET /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.GetPlaylist)))
 		mux.Handle("PATCH /api/phrase-playlists/{id}", middleware.Auth(http.HandlerFunc(phraseH.SetPlaylistFavorite)))
+		mux.Handle("GET /api/phrase-playlist-shares", middleware.Auth(http.HandlerFunc(phraseH.ListMyShares)))
 		mux.Handle("GET /api/phrase-playlists/{id}/shares", middleware.Auth(http.HandlerFunc(phraseH.ListShares)))
 		mux.Handle("GET /api/phrase-playlists/{id}/share-candidates", middleware.Auth(http.HandlerFunc(phraseH.ShareCandidates)))
 		mux.Handle("POST /api/phrase-playlists/{id}/shares", middleware.Auth(http.HandlerFunc(phraseH.AddShare)))

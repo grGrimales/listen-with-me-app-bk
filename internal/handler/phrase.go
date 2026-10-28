@@ -594,6 +594,8 @@ type phrasePlaylistSummary struct {
 	CreatedAt   string `json:"created_at"`
 	// Set only on vocab child playlists ("📗 Vocab · …"), returned with ?include_vocab=1.
 	ParentPlaylistID *int `json:"parent_playlist_id,omitempty"`
+	// True when the owner has shared it with someone (the owner's preview of /compartidos).
+	IsShared bool `json:"is_shared"`
 }
 
 // phraseItem.FocusText is the expression the phrase teaches, as written in Text.
@@ -664,12 +666,13 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 		       p.created_at,
 		       COUNT(DISTINCT g.id) AS group_count,
 		       COUNT(ph.id)         AS phrase_count,
-		       p.parent_playlist_id
+		       p.parent_playlist_id,
+		       EXISTS (SELECT 1 FROM phrase_playlist_shares x WHERE x.playlist_id = p.id) AS is_shared
 		FROM phrase_playlists p
 		LEFT JOIN phrase_groups g ON g.phrase_playlist_id = p.id
 		LEFT JOIN phrases ph      ON ph.phrase_group_id  = g.id
 		LEFT JOIN phrase_playlist_shares s ON s.playlist_id = p.id AND s.user_id = $1
-		WHERE (p.user_id = $1 OR s.user_id = $1)`
+		WHERE ` + visibleTo(r, "p", "s")
 	args := []any{userID}
 	if lang != "" {
 		q += ` AND p.language = $2`
@@ -693,7 +696,7 @@ func (h *PhraseHandler) ListPlaylists(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s phrasePlaylistSummary
 		var parentID sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &s.Language, &s.IsFavorite, &s.Role, &s.CreatedAt, &s.GroupCount, &s.PhraseCount, &parentID); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &s.Language, &s.IsFavorite, &s.Role, &s.CreatedAt, &s.GroupCount, &s.PhraseCount, &parentID, &s.IsShared); err != nil {
 			log.Printf("ListPlaylists scan: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -784,7 +787,7 @@ func (h *PhraseHandler) GetPlaylist(w http.ResponseWriter, r *http.Request) {
 		 FROM phrase_playlists p
 		 LEFT JOIN phrase_playlist_shares s ON s.playlist_id = p.id AND s.user_id = $2
 		 LEFT JOIN phrase_playlists parent ON parent.id = p.parent_playlist_id
-		 WHERE p.id = $1 AND (p.user_id = $2 OR s.user_id = $2)`,
+		 WHERE p.id = $1 AND `+strings.ReplaceAll(visibleTo(r, "p", "s"), "$1", "$2"),
 		id, userID,
 	).Scan(&pl.ID, &pl.Name, &pl.Description, &pl.Language, &pl.IsFavorite, &pl.Role, &parentID, &parentName, &storyPlaylistID)
 	if err == sql.ErrNoRows {
@@ -978,6 +981,33 @@ func (h *PhraseHandler) hasPlaylistAccess(userID string, playlistID int) (bool, 
 		FROM phrase_playlists p WHERE p.id = $2`, userID, playlistID,
 	).Scan(&ok)
 	return ok, err
+}
+
+// requirePhraseAccess resolves the playlist that owns the phrase and writes a 404/403
+// unless the user owns it or has a share. Returns true when the request may continue.
+func (h *PhraseHandler) requirePhraseAccess(w http.ResponseWriter, userID string, phraseID int) bool {
+	var playlistID int
+	err := h.db.QueryRow(`
+		SELECT g.phrase_playlist_id
+		FROM phrases ph
+		JOIN phrase_groups g ON g.id = ph.phrase_group_id
+		WHERE ph.id = $1`, phraseID,
+	).Scan(&playlistID)
+	if err == sql.ErrNoRows {
+		jsonError(w, "phrase not found", http.StatusNotFound)
+		return false
+	}
+	if err != nil {
+		log.Printf("requirePhraseAccess lookup: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	ok, err := h.hasPlaylistAccess(userID, playlistID)
+	if err != nil || !ok {
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 type vocabWordItem struct {
@@ -1434,13 +1464,17 @@ func (h *PhraseHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 // Generates (or returns cached) Polly audio for the phrase in its playlist's language
 // using the chosen voice gender. Uploads MP3 to storage and caches the URL per gender.
 func (h *PhraseHandler) GeneratePollyAudio(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.userIDFromContext(r); err != nil {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	phraseID, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
 		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePhraseAccess(w, userID, phraseID) {
 		return
 	}
 	if h.polly == nil {
@@ -1527,13 +1561,17 @@ const phraseElevenModel = "eleven_v3"
 // female voice for its playlist's language (Hope for en, Ana Dias for pt). The audio is
 // cached in polly_audio_url_female, so phrases that already have audio keep it as-is.
 func (h *PhraseHandler) GeneratePhraseAudio(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.userIDFromContext(r); err != nil {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	phraseID, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
 		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePhraseAccess(w, userID, phraseID) {
 		return
 	}
 	if h.elevenlabs == nil {
@@ -1707,6 +1745,9 @@ func (h *PhraseHandler) RatePhrase(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "quality must be 0..3", http.StatusBadRequest)
 		return
 	}
+	if !h.requirePhraseAccess(w, userID, phraseID) {
+		return
+	}
 
 	ef, interval := 2.5, 0.0
 	reps, lapses := 0, 0
@@ -1769,6 +1810,9 @@ func (h *PhraseHandler) LogReview(w http.ResponseWriter, r *http.Request) {
 	phraseID, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
 		jsonError(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.requirePhraseAccess(w, userID, phraseID) {
 		return
 	}
 	_, err = h.db.Exec(
@@ -2125,6 +2169,9 @@ func (h *PhraseHandler) LogZenListen(w http.ResponseWriter, r *http.Request) {
 		PlaylistID *int `json:"playlist_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !h.requirePhraseAccess(w, userID, phraseID) {
+		return
+	}
 	if _, err := h.db.Exec(
 		`INSERT INTO phrase_zen_listens (user_id, phrase_id, playlist_id) VALUES ($1, $2, $3)`,
 		userID, phraseID, body.PlaylistID,
@@ -2586,6 +2633,15 @@ func (h *PhraseHandler) PhraseEvaluationHistory(w http.ResponseWriter, r *http.R
 	jsonOK(w, items)
 }
 
+// visibleTo is the WHERE test for which phrase playlists the user sees: owned or shared,
+// or only shared for "shared" users. owner/share are the playlist and share aliases.
+func visibleTo(r *http.Request, owner, share string) string {
+	if middleware.SharedOnly(r) {
+		return share + ".user_id = $1"
+	}
+	return "(" + owner + ".user_id = $1 OR " + share + ".user_id = $1)"
+}
+
 func (h *PhraseHandler) userIDFromContext(r *http.Request) (string, error) {
 	claims, ok := r.Context().Value(middleware.ClaimsKey).(jwt.MapClaims)
 	if !ok {
@@ -2601,4 +2657,45 @@ func (h *PhraseHandler) userIDFromContext(r *http.Request) (string, error) {
 	default:
 		return fmt.Sprintf("%v", v), nil
 	}
+}
+
+type ownerShare struct {
+	PlaylistID int    `json:"playlist_id"`
+	UserID     string `json:"user_id"`
+	Permission string `json:"permission"`
+}
+
+// GET /api/phrase-playlist-shares
+// Every share on the current user's own playlists in one call, so the share manager
+// can show them by playlist or by user.
+func (h *PhraseHandler) ListMyShares(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.userIDFromContext(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	rows, err := h.db.Query(
+		`SELECT s.playlist_id, s.user_id, s.permission
+		 FROM phrase_playlist_shares s
+		 JOIN phrase_playlists p ON p.id = s.playlist_id
+		 WHERE p.user_id = $1
+		 ORDER BY s.created_at DESC`, userID,
+	)
+	if err != nil {
+		log.Printf("ListMyShares: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	items := []ownerShare{}
+	for rows.Next() {
+		var s ownerShare
+		if err := rows.Scan(&s.PlaylistID, &s.UserID, &s.Permission); err != nil {
+			log.Printf("ListMyShares scan: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		items = append(items, s)
+	}
+	jsonOK(w, items)
 }

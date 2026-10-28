@@ -44,6 +44,16 @@ func Auth(next http.Handler) http.Handler {
 			return
 		}
 
+		// Users with the "shared" role only get the /compartidos view: review, zen,
+		// search and evaluation of the phrase playlists shared with them. Checked here so no route is left
+		// open by forgetting to wrap it.
+		if claims, ok := token.Claims.(jwt.MapClaims); ok &&
+			hasRole(claims, "shared") && !hasRole(claims, "admin") &&
+			!sharedAllowed(r.Method, r.URL.Path) {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+
 		ctx := context.WithValue(r.Context(), ClaimsKey, token.Claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -58,17 +68,73 @@ func AdminOnly(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		rolesRaw := claims["roles"]
-		log.Printf("[DEBUG] AdminOnly: roles in token: %v (%T)", rolesRaw, rolesRaw)
-		
-		roles, _ := rolesRaw.([]interface{})
-		for _, role := range roles {
-			if role == "admin" {
-				next.ServeHTTP(w, r)
-				return
-			}
+		if hasRole(claims, "admin") {
+			next.ServeHTTP(w, r)
+			return
 		}
-		log.Printf("[DEBUG] AdminOnly: 'admin' role not found in %v", roles)
+		log.Printf("[DEBUG] AdminOnly: 'admin' role not found in %v", claims["roles"])
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 	})
+}
+
+// SharedOnly reports whether the request comes from a "shared" (non-admin) user, who
+// only sees the playlists shared with them, not ones they own. Must run after Auth.
+func SharedOnly(r *http.Request) bool {
+	claims, ok := r.Context().Value(ClaimsKey).(jwt.MapClaims)
+	return ok && hasRole(claims, "shared") && !hasRole(claims, "admin")
+}
+
+func hasRole(claims jwt.MapClaims, name string) bool {
+	roles, _ := claims["roles"].([]interface{})
+	for _, role := range roles {
+		if role == name {
+			return true
+		}
+	}
+	return false
+}
+
+// sharedRoutes is what a "shared" user may call; "*" matches one path segment.
+var sharedRoutes = []struct{ method, path string }{
+	{"GET", "/api/phrase-playlists"},
+	{"GET", "/api/phrase-playlists/*"},
+	{"GET", "/api/phrase-playlists/*/evaluation-stats"},
+	{"GET", "/api/phrase-playlists/*/vocabulary"},
+	{"POST", "/api/phrases/*/review"},
+	{"POST", "/api/phrases/*/zen-listen"},
+	{"POST", "/api/phrases/*/rate"},
+	{"POST", "/api/phrases/*/evaluate"},
+	{"POST", "/api/phrases/*/audio/generate"},
+	{"POST", "/api/phrases/*/audio/polly"},
+	{"GET", "/api/phrases/*/evaluation-history"},
+	{"GET", "/api/phrase-stats/me"},
+	{"GET", "/api/phrase-stats/me/detailed"},
+	{"GET", "/api/phrase-zen-stats/me/detailed"},
+	{"GET", "/api/search/sources"},
+	{"GET", "/api/search"},
+	{"PUT", "/api/user/language"},
+}
+
+func sharedAllowed(method, path string) bool {
+	got := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	for _, rt := range sharedRoutes {
+		if rt.method != method {
+			continue
+		}
+		want := strings.Split(rt.path, "/")
+		if len(want) != len(got) {
+			continue
+		}
+		match := true
+		for i := range want {
+			if want[i] != "*" && want[i] != got[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
