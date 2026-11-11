@@ -1457,6 +1457,18 @@ func (r *StoryRepo) RemoveStoryFromPlaylist(playlistID, storyID int) error {
 // --- User Vocabulary ---
 
 func (r *StoryRepo) AddUserVocabulary(v *model.UserVocabulary) error {
+	// Saving the same phrase twice (double click) returns the existing entry instead of a
+	// duplicate: both entries would share one playlist phrase, and deleting either would
+	// take that phrase away from the other.
+	err := r.db.QueryRow(
+		`SELECT id, position, audio_url, created_at FROM user_story_vocabulary
+		 WHERE user_id = $1 AND story_id = $2 AND lower(phrase) = lower($3)
+		 ORDER BY id LIMIT 1`,
+		v.UserID, v.StoryID, v.Phrase,
+	).Scan(&v.ID, &v.Position, &v.AudioURL, &v.CreatedAt)
+	if err != sql.ErrNoRows {
+		return err
+	}
 	return r.db.QueryRow(
 		`WITH next_pos AS (
 		   SELECT COALESCE(MAX(position), -1) + 1 AS pos
@@ -1541,6 +1553,8 @@ func (r *StoryRepo) DeleteUserVocabulary(id int, userID string) error {
 // RemoveStoryPlaylistPhrases deletes the matching phrase from all of the user's
 // story-linked word playlists (same source story + text). Cascades drop its
 // reviews / zen listens / SRS — losing those stats is intentional here.
+// Call it after deleting the vocabulary entry: while another entry of the same story
+// still holds the phrase (a duplicate save), the playlist phrase is kept.
 func (r *StoryRepo) RemoveStoryPlaylistPhrases(userID string, storyID int, phrase string) error {
 	_, err := r.db.Exec(`
 		DELETE FROM phrases ph
@@ -1550,7 +1564,11 @@ func (r *StoryRepo) RemoveStoryPlaylistPhrases(userID string, storyID int, phras
 		  AND pp.user_id = $1
 		  AND pp.story_playlist_id IS NOT NULL
 		  AND ph.source_story_id = $2
-		  AND lower(ph.text) = lower($3)`,
+		  AND lower(ph.text) = lower($3)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM user_story_vocabulary v
+		      WHERE v.user_id = $1 AND v.story_id = $2 AND lower(v.phrase) = lower($3)
+		  )`,
 		userID, storyID, phrase,
 	)
 	return err
